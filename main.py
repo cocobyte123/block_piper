@@ -721,7 +721,8 @@ class PixelPIDController:
 def refine_position_to_center_with_spatial_tracking(robot, camera_manager, current_pos, initial_pixel_offset, 
                                                    target_yolo_prefix, initial_world_pos,
                                                    img_center_x=320, img_center_y=240,
-                                                   max_iterations=3, tolerance_pixels=20):
+                                                   max_iterations=3, tolerance_pixels=20,
+                                                   stage_name="精确对中"):
     """
     空间跟踪精确对中：基于空间位置和类型跟踪，避免ID混淆
     
@@ -732,7 +733,7 @@ def refine_position_to_center_with_spatial_tracking(robot, camera_manager, curre
     Returns:
         (refined_pos, final_pixel): 精确对中后的位置、最终像素坐标
     """
-    print(f"\n  -> 【空间跟踪精确对中】开始迭代...")
+    print(f"\n  -> 【空间跟踪{stage_name}】开始迭代...")
     print(f"     目标类型: {target_yolo_prefix}")
     print(f"     初始世界位置: [{initial_world_pos[0]:.3f}, {initial_world_pos[1]:.3f}, {initial_world_pos[2]:.3f}]")
     print(f"     图像中心: ({img_center_x}, {img_center_y})")
@@ -879,11 +880,11 @@ def refine_position_to_center_with_spatial_tracking(robot, camera_manager, curre
     
     final_offset = np.sqrt((px - img_center_x)**2 + (py - img_center_y)**2)
     if final_offset <= tolerance_pixels:
-        print(f"\n  ✓ 空间跟踪精确对中成功！最终误差: {final_offset:.1f}px")
+        print(f"\n  ✓ 空间跟踪{stage_name}成功！最终误差: {final_offset:.1f}px")
     else:
-        print(f"\n  ⚠ 达最大迭代次数，最终误差: {final_offset:.1f}px")
+        print(f"\n  ⚠ {stage_name}达最大迭代次数，最终误差: {final_offset:.1f}px")
     
-    return refined_pos, (px, py)
+    return refined_pos, (px, py), np.array(initial_world_pos)
 # ================= 抓取偏移计算函数 =================
 def calculate_grasp_offset(current_rz_deg, offset_distance_mm=20.0):
     """
@@ -971,6 +972,29 @@ def apply_grasp_offset(robot, offset_x_m, offset_y_m, speed=30):
     print(f"     实际位置: [{actual_pos[0]:.6f}, {actual_pos[1]:.6f}, {actual_pos[2]:.6f}]")
     
     return np.array(actual_pos)
+
+def find_nearest_tracked_candidate(detection_data, yolo_prefix, reference_world_pos):
+    """从检测结果中找离参考世界坐标最近的同类型积木。"""
+    if not detection_data:
+        return None, None
+
+    candidates = []
+    reference_world_pos = np.array(reference_world_pos[:3])
+
+    for block_id, data in detection_data.items():
+        if not block_id.startswith(yolo_prefix) or len(data) < 3 or data[2] is None:
+            continue
+        world_pos = np.array(data[0][:3])
+        distance = np.linalg.norm(world_pos - reference_world_pos)
+        candidates.append((distance, block_id, data))
+
+    if not candidates:
+        return None, None
+
+    candidates.sort(key=lambda item: item[0])
+    distance, block_id, data = candidates[0]
+    print(f"  -> [旋转后重锁定] {block_id}, 距参考位置 {distance * 1000:.1f}mm")
+    return block_id, data
 
 # ================= 修改候选积木选择函数 =================
 def select_best_candidate(processed_yolo_data, yolo_prefix, robot, camera_manager,
@@ -1063,11 +1087,54 @@ def select_best_candidate(processed_yolo_data, yolo_prefix, robot, camera_manage
         print(f"     初始像素: ({selected_data[2][0]:.1f}, {selected_data[2][1]:.1f})")
         print(f"     初始世界位置: [{initial_world_pos[0]:.3f}, {initial_world_pos[1]:.3f}, {initial_world_pos[2]:.3f}]")
         
-        # ============ 使用新的空间跟踪精确对中函数 ============
-        refined_pos, final_pixel = refine_position_to_center_with_spatial_tracking(
+        # 先做粗对中：只需要大致靠近中心，避免一上来旋转导致目标跑出视野。
+        rough_pos, rough_pixel, tracked_world_pos = refine_position_to_center_with_spatial_tracking(
             robot, camera_manager, current_pos, selected_data[2], 
-            yolo_prefix, initial_world_pos,  # 传入类型前缀和初始世界位置
-            img_center_x=img_center_x, img_center_y=img_center_y
+            yolo_prefix, initial_world_pos,
+            img_center_x=img_center_x, img_center_y=img_center_y,
+            max_iterations=1,
+            tolerance_pixels=55,
+            stage_name="粗对中"
+        )
+
+        print(f"  -> 粗对中后: [{rough_pos[0]:.6f}, {rough_pos[1]:.6f}], 像素({rough_pixel[0]:.1f}, {rough_pixel[1]:.1f})")
+
+        # 粗对中后先旋转夹爪，后续精对中基于最终抓取姿态进行。
+        rotate_gripper_to_angle(robot, target_gripper_angle_rad)
+        camera_manager.update_robot_pose(robot)
+
+        rotated_detection = camera_manager.get_detection(stabilize_time=0.05)
+        tracked_id, tracked_data = find_nearest_tracked_candidate(
+            rotated_detection,
+            yolo_prefix,
+            tracked_world_pos
+        )
+
+        if tracked_data is not None:
+            best_candidate = tracked_id
+            selected_data = tracked_data
+            initial_world_pos = selected_data[0][:3]
+            initial_pixel = selected_data[2]
+        else:
+            print("  ⚠ 旋转后未重新锁定目标，使用粗对中结果继续精对中")
+            initial_world_pos = tracked_world_pos
+            initial_pixel = rough_pixel
+
+        end_pose_msg = robot.GetArmEndPoseMsgs()
+        current_pos = np.array([
+            end_pose_msg.end_pose.X_axis / 1000000.0,
+            end_pose_msg.end_pose.Y_axis / 1000000.0,
+            end_pose_msg.end_pose.Z_axis / 1000000.0
+        ])
+
+        # 旋转后再做精对中：此时相机/夹爪和积木的相对关系已经是最终抓取姿态。
+        refined_pos, final_pixel, tracked_world_pos = refine_position_to_center_with_spatial_tracking(
+            robot, camera_manager, current_pos, initial_pixel,
+            yolo_prefix, initial_world_pos,
+            img_center_x=img_center_x, img_center_y=img_center_y,
+            max_iterations=3,
+            tolerance_pixels=18,
+            stage_name="旋转后精对中"
         )
         
         print(f"  -> 精确对中后: [{refined_pos[0]:.6f}, {refined_pos[1]:.6f}]")
