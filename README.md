@@ -104,6 +104,23 @@ Then run the main program manually:
 python main.py
 ```
 
+## Warmup Check
+
+Before the full demo, you can send the Piper arm to the zero pose and show the RealSense color image:
+
+```bash
+python warmup_check.py
+```
+
+Useful options:
+
+```bash
+python warmup_check.py --can can1
+python warmup_check.py --skip-arm
+python warmup_check.py --skip-camera
+python warmup_check.py --seconds 10
+```
+
 ## Notes
 
 - The main program expects the Piper arm and RealSense camera to be connected.
