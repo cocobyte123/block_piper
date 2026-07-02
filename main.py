@@ -1350,7 +1350,7 @@ def select_best_candidate(processed_yolo_data, yolo_prefix, robot, camera_manage
             yolo_prefix, initial_world_pos,
             img_center_x=img_center_x, img_center_y=img_center_y,
             max_iterations=3,
-            tolerance_pixels=20,
+            tolerance_pixels=12,
             stage_name="粗对中",
             tracking_mode="world",
             use_pid=True,
@@ -1786,7 +1786,7 @@ def main():
                 enable_refinement=True,
                 enable_grasp_offset=True,
                 grasp_offset_mm=70.0,
-                grasp_lateral_offset_mm=5.0
+                grasp_lateral_offset_mm=8.0
             )
             
             if not selected_yolo_id:
