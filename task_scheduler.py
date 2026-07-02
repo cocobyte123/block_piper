@@ -446,6 +446,10 @@ class TaskScheduler:
                     # 如果上一个在左边(X更小)，我们向左推(slide_direction=+1.0)
                     slide_direction = -1.0 if prev_block_pos_x > current_block_pos_x else 1.0
 
+        if current_block_layer_name == "layer_1":
+            final_lift_pos = np.array([pre_place_pos[0], pre_place_pos[1], place_pos[2] + 0.10]).tolist()
+            print("  -> 第一层撤离点提高到放置高度上方10cm，减少低位回观察点的IK压力。")
+
         # 强制为 code3 积木设置为垂直放置
         if 'code3' in block_id:
             slide_direction = 0.0

@@ -1108,13 +1108,14 @@ def refine_position_to_center_with_spatial_tracking(robot, camera_manager, curre
     
     return refined_pos, (px, py), np.array(initial_world_pos)
 # ================= 抓取偏移计算函数 =================
-def calculate_grasp_offset(current_rz_deg, offset_distance_mm=20.0):
+def calculate_grasp_offset(current_rz_deg, offset_distance_mm=20.0, lateral_offset_mm=0.0):
     """
     根据当前夹爪RZ角度计算抓取偏移量。
     
     原理：
     - 像素中心对齐后，相机/夹爪和积木的相对位置近似固定。
     - 抓取点需要从当前夹爪位置沿夹爪“前方”偏移一段距离。
+    - 相机不在夹爪正中心时，可额外沿夹爪“右侧”补偿 lateral_offset_mm。
     - 这里沿用原来的方向约定：
       RZ=0°   -> 世界坐标 +Y
       RZ=-90° -> 世界坐标 +X
@@ -1123,19 +1124,29 @@ def calculate_grasp_offset(current_rz_deg, offset_distance_mm=20.0):
     Args:
         current_rz_deg: 当前夹爪RZ角度（度）
         offset_distance_mm: 沿夹爪前进方向的偏移距离（毫米）
+        lateral_offset_mm: 沿夹爪右侧方向的偏移距离（毫米，负数表示向左）
     
     Returns:
         (offset_x_m, offset_y_m): 机械臂基座坐标系下的XY偏移（米）
     """
     rz_rad = np.radians(current_rz_deg)
     forward_rad = rz_rad + np.pi / 2
-    offset_distance_m = offset_distance_mm / 1000.0
+    right_rad = forward_rad - np.pi / 2
+    forward_offset_m = offset_distance_mm / 1000.0
+    lateral_offset_m = lateral_offset_mm / 1000.0
 
-    offset_x_m = offset_distance_m * np.cos(forward_rad)
-    offset_y_m = offset_distance_m * np.sin(forward_rad)
+    offset_x_m = (
+        forward_offset_m * np.cos(forward_rad) +
+        lateral_offset_m * np.cos(right_rad)
+    )
+    offset_y_m = (
+        forward_offset_m * np.sin(forward_rad) +
+        lateral_offset_m * np.sin(right_rad)
+    )
     
-    print(f"  [抓取偏移] RZ={current_rz_deg:.1f}°, 偏移{offset_distance_mm}mm")
+    print(f"  [抓取偏移] RZ={current_rz_deg:.1f}°, 前向{offset_distance_mm}mm, 右向{lateral_offset_mm}mm")
     print(f"             → 夹爪前方角度: {np.degrees(forward_rad):.1f}°")
+    print(f"             → 夹爪右侧角度: {np.degrees(right_rad):.1f}°")
     print(f"             → 世界坐标: ΔX={offset_x_m*1000:.2f}mm, ΔY={offset_y_m*1000:.2f}mm")
     
     return offset_x_m, offset_y_m
@@ -1247,6 +1258,7 @@ def select_best_candidate(processed_yolo_data, yolo_prefix, robot, camera_manage
                          enable_refinement=True, 
                          enable_grasp_offset=True,
                          grasp_offset_mm=50.0,
+                         grasp_lateral_offset_mm=5.0,
                          img_center_x=320, img_center_y=240):
     """
     选择积木：基于真实世界坐标（先左后右，从上到下 = Y最大，相近时X最大）
@@ -1422,7 +1434,11 @@ def select_best_candidate(processed_yolo_data, yolo_prefix, robot, camera_manage
                 end_pose_msg.end_pose.Z_axis / 1000000.0
             ]
 
-            offset_x_m, offset_y_m = calculate_grasp_offset(final_rz_deg, grasp_offset_mm)
+            offset_x_m, offset_y_m = calculate_grasp_offset(
+                final_rz_deg,
+                grasp_offset_mm,
+                lateral_offset_mm=grasp_lateral_offset_mm
+            )
             final_x = current_pos[0] + offset_x_m
             final_y = current_pos[1] + offset_y_m
 
@@ -1769,7 +1785,8 @@ def main():
                 target_gripper_angle_rad,  # 传入预先计算好的角度
                 enable_refinement=True,
                 enable_grasp_offset=True,
-                grasp_offset_mm=70.0
+                grasp_offset_mm=70.0,
+                grasp_lateral_offset_mm=5.0
             )
             
             if not selected_yolo_id:
