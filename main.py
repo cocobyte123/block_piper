@@ -36,10 +36,11 @@ CAMERA_COORDINATE_CONFIG = {
 # ================= 相机可视化线程 =================
 class CameraVisualizationThread(threading.Thread):
     """独立线程显示相机画面和YOLO检测结果"""
-    def __init__(self, detector, detection_lock=None, detection_interval=0.5):
+    def __init__(self, detector, detection_lock=None, detection_interval=0.5, main_detection_event=None):
         super().__init__(daemon=True)
         self.detector = detector
         self.detection_lock = detection_lock
+        self.main_detection_event = main_detection_event
         self.detection_interval = detection_interval
         self.max_detection_age = 1.0
         self.last_detection_time = 0.0
@@ -167,7 +168,15 @@ class CameraVisualizationThread(threading.Thread):
         
         while self.running:
             lock_acquired = False
+            color_image = None
+            detection_to_draw = None
+            detection_count = 0
+            detection_age = None
             try:
+                if self.main_detection_event and self.main_detection_event.is_set():
+                    time.sleep(0.03)
+                    continue
+
                 if self.detection_lock:
                     lock_acquired = self.detection_lock.acquire(blocking=False)
                     if not lock_acquired:
@@ -192,31 +201,12 @@ class CameraVisualizationThread(threading.Thread):
                         detection_age = now - self.last_detection_time if self.last_detection_time else None
                         is_fresh = detection_age is not None and detection_age <= self.max_detection_age
                         if self.last_detection_result and is_fresh:
-                            color_image = self.draw_detection_results(color_image, self.last_detection_result)
+                            detection_to_draw = self.last_detection_result
+                            detection_count = len(self.last_detection_result)
                     except Exception as e:
                         # 检测失败时继续显示原图
                         cv2.putText(color_image, f"Detection Error: {str(e)[:50]}", 
                                    (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 0, 255), 2)
-                
-                # 显示图像
-                detection_age = None
-                if self.show_detections and self.last_detection_time:
-                    detection_age = time.time() - self.last_detection_time
-                detection_is_fresh = detection_age is not None and detection_age <= self.max_detection_age
-                detection_count = len(self.last_detection_result or {}) if self.show_detections and detection_is_fresh else 0
-                color_image = self.draw_alignment_overlay(color_image, detection_count, detection_age)
-
-                cv2.imshow('YOLO Detection Live View', color_image)
-                
-                # 处理按键
-                key = cv2.waitKey(1) & 0xFF
-                if key == ord('q') or key == ord('Q'):
-                    print("用户请求退出可视化")
-                    break
-                elif key == ord('d') or key == ord('D'):
-                    self.show_detections = not self.show_detections
-                    status = "ON" if self.show_detections else "OFF"
-                    print(f"检测框显示已切换为: {status}")
                     
             except Exception as e:
                 print(f"可视化线程错误: {e}")
@@ -224,6 +214,31 @@ class CameraVisualizationThread(threading.Thread):
             finally:
                 if lock_acquired:
                     self.detection_lock.release()
+
+            if color_image is None:
+                continue
+
+            if detection_to_draw:
+                color_image = self.draw_detection_results(color_image, detection_to_draw)
+
+            if self.show_detections and self.last_detection_time:
+                detection_age = time.time() - self.last_detection_time
+                if detection_age > self.max_detection_age:
+                    detection_count = 0
+
+            color_image = self.draw_alignment_overlay(color_image, detection_count, detection_age)
+            cv2.imshow('YOLO Detection Live View', color_image)
+
+            key = cv2.waitKey(1) & 0xFF
+            if key == ord('q') or key == ord('Q'):
+                print("用户请求退出可视化")
+                break
+            elif key == ord('d') or key == ord('D'):
+                self.show_detections = not self.show_detections
+                status = "ON" if self.show_detections else "OFF"
+                print(f"检测框显示已切换为: {status}")
+
+            time.sleep(0.02)
         
         cv2.destroyAllWindows()
         print("📹 相机可视化已关闭")
@@ -238,11 +253,16 @@ class CameraManager:
     def __init__(self, enable_visualization=True):
         self.detector = DetectionSystem()
         self.detection_lock = threading.Lock()
+        self.main_detection_event = threading.Event()
         self.enable_visualization = enable_visualization
         self.viz_thread = None
         
         if enable_visualization:
-            self.viz_thread = CameraVisualizationThread(self.detector, self.detection_lock)
+            self.viz_thread = CameraVisualizationThread(
+                self.detector,
+                self.detection_lock,
+                main_detection_event=self.main_detection_event,
+            )
             self.viz_thread.start()
             print("✓ 相机可视化线程已启动")
             print("   - 默认显示原始画面；按 'D' 后以低频率显示YOLO检测框和标签")
@@ -273,8 +293,21 @@ class CameraManager:
         return self._run_single_detection()
     
     def _run_single_detection(self):
-        with self.detection_lock:
-            return self.detector.run_single_detection()
+        self.main_detection_event.set()
+        wait_start = time.perf_counter()
+        try:
+            with self.detection_lock:
+                wait_time = time.perf_counter() - wait_start
+                if wait_time > 0.2:
+                    print(f"  ⚠ 等待相机/YOLO锁 {wait_time:.2f}s")
+                detect_start = time.perf_counter()
+                result = self.detector.run_single_detection()
+                detect_time = time.perf_counter() - detect_start
+                if detect_time > 0.8:
+                    print(f"  ⚠ 单次YOLO检测耗时 {detect_time:.2f}s")
+                return result
+        finally:
+            self.main_detection_event.clear()
     
     
     def get_stable_detection(self, num_samples=2, skip_frames=2, sample_interval=0.02, 
@@ -688,7 +721,7 @@ class PixelPIDController:
 def refine_position_to_center_with_spatial_tracking(robot, camera_manager, current_pos, initial_pixel_offset, 
                                                    target_yolo_prefix, initial_world_pos,
                                                    img_center_x=320, img_center_y=240,
-                                                   max_iterations=6, tolerance_pixels=15):
+                                                   max_iterations=3, tolerance_pixels=20):
     """
     空间跟踪精确对中：基于空间位置和类型跟踪，避免ID混淆
     
@@ -759,7 +792,7 @@ def refine_position_to_center_with_spatial_tracking(robot, camera_manager, curre
         robot.MotionCtrl_2(0x01, 0x00, 30, 0x00)
         robot.EndPoseCtrl(piper_pos[0], piper_pos[1], piper_pos[2], 
                          current_gripper_euler[0], current_gripper_euler[1], current_gripper_euler[2])
-        time.sleep(0.15)    # 对中微调等待（s）
+        time.sleep(0.05)    # 对中微调等待（s）
 
         # 获取实际位置
         end_pose_msg = robot.GetArmEndPoseMsgs()
@@ -772,7 +805,10 @@ def refine_position_to_center_with_spatial_tracking(robot, camera_manager, curre
         
         # 重新检测
         camera_manager.update_robot_pose(robot)
-        desktop_data = camera_manager.get_detection(stabilize_time=0.1)
+        detect_start = time.perf_counter()
+        desktop_data = camera_manager.get_detection(stabilize_time=0.0)
+        detect_elapsed = time.perf_counter() - detect_start
+        print(f"       重新检测耗时: {detect_elapsed:.2f}s")
         
         if not desktop_data:
             print(f"       ✗ 迭代{iteration}: 未检测到积木")
