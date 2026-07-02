@@ -65,18 +65,21 @@ class DetectionSystem:
         print("相机已关闭。")
 
     # 修改 run_single_detection 方法中的返回格式：
-    def run_single_detection(self):
+    def run_single_detection(self, verbose=False):
         """执行单次检测并返回结果，不显示UI。"""
-        print("正在执行单次检测...")
+        if verbose:
+            print("正在执行单次检测...")
         color_frame, depth_frame = self.get_frames()
         if not color_frame or not depth_frame:
-            print("获取帧失败,无法执行检测。")
+            if verbose:
+                print("获取帧失败,无法执行检测。")
             return None
         
         color_image = np.asanyarray(color_frame.get_data())
         
         if self.robot_position is None or self.robot_quaternion is None:
-            print("错误：机器人位姿未设置，无法计算基座坐标。")
+            if verbose:
+                print("错误：机器人位姿未设置，无法计算基座坐标。")
             return None
             
         _, detections = self.process_frame(

@@ -41,6 +41,7 @@ class CameraVisualizationThread(threading.Thread):
         self.detector = detector
         self.detection_lock = detection_lock
         self.detection_interval = detection_interval
+        self.max_detection_age = 1.0
         self.last_detection_time = 0.0
         self.last_detection_result = None
         self.running = True
@@ -55,37 +56,20 @@ class CameraVisualizationThread(threading.Thread):
         h, w = image.shape[:2]
         center_x, center_y = w // 2, h // 2
 
-        cv2.line(overlay, (center_x - 36, center_y), (center_x - 10, center_y), (255, 255, 255), 2, cv2.LINE_AA)
-        cv2.line(overlay, (center_x + 10, center_y), (center_x + 36, center_y), (255, 255, 255), 2, cv2.LINE_AA)
-        cv2.line(overlay, (center_x, center_y - 36), (center_x, center_y - 10), (255, 255, 255), 2, cv2.LINE_AA)
-        cv2.line(overlay, (center_x, center_y + 10), (center_x, center_y + 36), (255, 255, 255), 2, cv2.LINE_AA)
-        cv2.circle(overlay, (center_x, center_y), 15, (80, 220, 255), 1, cv2.LINE_AA)
-        cv2.circle(overlay, (center_x, center_y), 35, (80, 220, 255), 1, cv2.LINE_AA)
+        cv2.line(overlay, (center_x - 32, center_y), (center_x + 32, center_y), (255, 255, 255), 1, cv2.LINE_AA)
+        cv2.line(overlay, (center_x, center_y - 32), (center_x, center_y + 32), (255, 255, 255), 1, cv2.LINE_AA)
+        cv2.circle(overlay, (center_x, center_y), 24, (80, 220, 255), 1, cv2.LINE_AA)
         cv2.circle(overlay, (center_x, center_y), 3, (0, 255, 255), -1, cv2.LINE_AA)
-
-        cv2.line(overlay, (center_x, 0), (center_x, h), (255, 255, 255), 1, cv2.LINE_AA)
-        cv2.line(overlay, (0, center_y), (w, center_y), (255, 255, 255), 1, cv2.LINE_AA)
-        image = cv2.addWeighted(overlay, 0.35, image, 0.65, 0)
-
-        panel = image.copy()
-        cv2.rectangle(panel, (0, 0), (w, 64), (18, 18, 18), -1)
-        image = cv2.addWeighted(panel, 0.45, image, 0.55, 0)
+        image = cv2.addWeighted(overlay, 0.45, image, 0.55, 0)
 
         mode = "DETECT ON" if self.show_detections else "DETECT OFF"
         age_text = "--" if detection_age is None else f"{detection_age:.1f}s"
         self._draw_text_with_shadow(
             image,
-            f"{mode} | blocks {detection_count} | age {age_text} | D toggle | Q quit",
-            (16, 26),
-            scale=0.62,
+            f"{mode}  blocks:{detection_count}  age:{age_text}   D toggle / Q quit",
+            (12, h - 16),
+            scale=0.55,
             color=(120, 255, 180) if self.show_detections else (190, 190, 190),
-        )
-        self._draw_text_with_shadow(
-            image,
-            "Center target: align block center inside the inner ring before grasp refinement",
-            (16, 52),
-            scale=0.5,
-            color=(230, 230, 230),
         )
         return image
         
@@ -112,6 +96,8 @@ class CameraVisualizationThread(threading.Thread):
         }
         
         overlay = image.copy()
+        image_h, image_w = image.shape[:2]
+        image_center_x, image_center_y = image_w // 2, image_h // 2
         
         for block_id, data in detection_data.items():
             try:
@@ -155,27 +141,14 @@ class CameraVisualizationThread(threading.Thread):
                     cv2.arrowedLine(overlay, (cx, cy), (end_x, end_y), 
                                 (255, 0, 0), 3, tipLength=0.3)
                     
-                    # 4. 添加标签（参考 detection_system.py 的文本样式）
-                    label = f"{block_id}"
+                    label = f"{block_id}  d={distance_px:.0f}px"
                     cv2.putText(overlay, label, 
                             (cx - w//2, cy - h//2 - 10),
                             cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 0, 255), 2)
                     
-                    # 角度标签
-                    angle_text = f"Angle: {np.degrees(angle_rad):.1f}"
-                    cv2.putText(overlay, angle_text, 
-                            (cx - w//2, cy + h//2 + 20),
-                            cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 0), 2)
-                    
-                    # 世界坐标标签
-                    coord_text = f"World: ({world_pos[0]:.3f}, {world_pos[1]:.3f})"
-                    cv2.putText(overlay, coord_text, 
-                            (cx - w//2, cy + h//2 + 50),
-                            cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 255), 2)
-
-                    offset_text = f"Offset: dx={dx:+d}px dy={dy:+d}px dist={distance_px:.0f}px"
+                    offset_text = f"dx={dx:+d}px dy={dy:+d}px"
                     cv2.putText(overlay, offset_text,
-                            (cx - w//2, cy + h//2 + 78),
+                            (cx - w//2, cy + h//2 + 20),
                             cv2.FONT_HERSHEY_SIMPLEX, 0.55, (255, 255, 255), 2)
                     
             except Exception as e:
@@ -216,7 +189,9 @@ class CameraVisualizationThread(threading.Thread):
                         if now - self.last_detection_time >= self.detection_interval:
                             self.last_detection_result = self.detector.run_single_detection()
                             self.last_detection_time = now
-                        if self.last_detection_result:
+                        detection_age = now - self.last_detection_time if self.last_detection_time else None
+                        is_fresh = detection_age is not None and detection_age <= self.max_detection_age
+                        if self.last_detection_result and is_fresh:
                             color_image = self.draw_detection_results(color_image, self.last_detection_result)
                     except Exception as e:
                         # 检测失败时继续显示原图
@@ -224,10 +199,11 @@ class CameraVisualizationThread(threading.Thread):
                                    (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 0, 255), 2)
                 
                 # 显示图像
-                detection_count = len(self.last_detection_result or {}) if self.show_detections else 0
                 detection_age = None
                 if self.show_detections and self.last_detection_time:
                     detection_age = time.time() - self.last_detection_time
+                detection_is_fresh = detection_age is not None and detection_age <= self.max_detection_age
+                detection_count = len(self.last_detection_result or {}) if self.show_detections and detection_is_fresh else 0
                 color_image = self.draw_alignment_overlay(color_image, detection_count, detection_age)
 
                 cv2.imshow('YOLO Detection Live View', color_image)
@@ -566,16 +542,15 @@ def observe_from_global_view(robot, camera_manager):
         GLOBAL_OBSERVATION_CONFIG['quat']
     )
     
-    if not success:
-        return None
-    
     camera_manager.update_robot_pose(robot)
-    time.sleep(0.5)  # 短暂稳定
+    if not success:
+        print("  ⚠ 未到达全局观察点，使用当前视角继续检测")
+    time.sleep(0.15 if success else 0.02)
     
     # 使用稳定检测：跳过2帧，采样4次
     return camera_manager.get_stable_detection(
-        num_samples=2, 
-        skip_frames=2, 
+        num_samples=2 if success else 1, 
+        skip_frames=2 if success else 1, 
         sample_interval=0.02,
         angle_tolerance_deg=6.0,      # 全局观察角度容差稍严格
         position_tolerance_mm=3.0     # 全局观察位置容差稍严格
@@ -591,17 +566,15 @@ def observe_from_local_view(robot, camera_manager, rough_pos, observation_z=0.30
     print(f"  -> 【局部观察】移动到 [{local_obs_pos[0]:.3f}, {local_obs_pos[1]:.3f}, {local_obs_pos[2]:.3f}]...")
     success = move_to_observation_point(robot, local_obs_pos, local_obs_quat)
     
-    if not success:
-        print("  ✗ 局部观察位置移动失败")
-        return None, False
-    
     camera_manager.update_robot_pose(robot)
-    time.sleep(0.3)  # 短暂稳定
+    if not success:
+        print("  ⚠ 未到达局部观察点，使用当前视角继续检测")
+    time.sleep(0.12 if success else 0.02)
     
     # 使用稳定检测：跳过1帧，采样3次（局部观察要求稍低）
     detection = camera_manager.get_stable_detection(
-        num_samples=2, 
-        skip_frames=2, 
+        num_samples=2 if success else 1, 
+        skip_frames=2 if success else 1, 
         sample_interval=0.02,
         angle_tolerance_deg=10.0,     # 局部观察角度容差稍宽松
         position_tolerance_mm=8.0     # 局部观察位置容差稍宽松
@@ -1291,7 +1264,7 @@ def main():
                 print(f"  -> 使用默认位置作为局部观察目标")
             
             # ============ 步骤2.3: 局部观察（带重试）============
-            max_retries = 3
+            max_retries = 1
             local_success = False
             processed_local_data = None
             
