@@ -1092,7 +1092,7 @@ def select_best_candidate(processed_yolo_data, yolo_prefix, robot, camera_manage
             robot, camera_manager, current_pos, selected_data[2], 
             yolo_prefix, initial_world_pos,
             img_center_x=img_center_x, img_center_y=img_center_y,
-            max_iterations=1,
+            max_iterations=3,
             tolerance_pixels=55,
             stage_name="粗对中"
         )
@@ -1133,7 +1133,7 @@ def select_best_candidate(processed_yolo_data, yolo_prefix, robot, camera_manage
             yolo_prefix, initial_world_pos,
             img_center_x=img_center_x, img_center_y=img_center_y,
             max_iterations=3,
-            tolerance_pixels=18,
+            tolerance_pixels=5,
             stage_name="旋转后精对中"
         )
         
