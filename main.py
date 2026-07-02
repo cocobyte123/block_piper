@@ -44,7 +44,50 @@ class CameraVisualizationThread(threading.Thread):
         self.last_detection_time = 0.0
         self.last_detection_result = None
         self.running = True
-        self.show_detections = False  # Press D to enable low-rate detection overlay.
+        self.show_detections = True
+    
+    def _draw_text_with_shadow(self, image, text, org, scale=0.55, color=(255, 255, 255), thickness=1):
+        cv2.putText(image, text, org, cv2.FONT_HERSHEY_SIMPLEX, scale, (0, 0, 0), thickness + 2, cv2.LINE_AA)
+        cv2.putText(image, text, org, cv2.FONT_HERSHEY_SIMPLEX, scale, color, thickness, cv2.LINE_AA)
+
+    def draw_alignment_overlay(self, image, detection_count=0, detection_age=None):
+        overlay = image.copy()
+        h, w = image.shape[:2]
+        center_x, center_y = w // 2, h // 2
+
+        cv2.line(overlay, (center_x - 36, center_y), (center_x - 10, center_y), (255, 255, 255), 2, cv2.LINE_AA)
+        cv2.line(overlay, (center_x + 10, center_y), (center_x + 36, center_y), (255, 255, 255), 2, cv2.LINE_AA)
+        cv2.line(overlay, (center_x, center_y - 36), (center_x, center_y - 10), (255, 255, 255), 2, cv2.LINE_AA)
+        cv2.line(overlay, (center_x, center_y + 10), (center_x, center_y + 36), (255, 255, 255), 2, cv2.LINE_AA)
+        cv2.circle(overlay, (center_x, center_y), 15, (80, 220, 255), 1, cv2.LINE_AA)
+        cv2.circle(overlay, (center_x, center_y), 35, (80, 220, 255), 1, cv2.LINE_AA)
+        cv2.circle(overlay, (center_x, center_y), 3, (0, 255, 255), -1, cv2.LINE_AA)
+
+        cv2.line(overlay, (center_x, 0), (center_x, h), (255, 255, 255), 1, cv2.LINE_AA)
+        cv2.line(overlay, (0, center_y), (w, center_y), (255, 255, 255), 1, cv2.LINE_AA)
+        image = cv2.addWeighted(overlay, 0.35, image, 0.65, 0)
+
+        panel = image.copy()
+        cv2.rectangle(panel, (0, 0), (w, 64), (18, 18, 18), -1)
+        image = cv2.addWeighted(panel, 0.45, image, 0.55, 0)
+
+        mode = "DETECT ON" if self.show_detections else "DETECT OFF"
+        age_text = "--" if detection_age is None else f"{detection_age:.1f}s"
+        self._draw_text_with_shadow(
+            image,
+            f"{mode} | blocks {detection_count} | age {age_text} | D toggle | Q quit",
+            (16, 26),
+            scale=0.62,
+            color=(120, 255, 180) if self.show_detections else (190, 190, 190),
+        )
+        self._draw_text_with_shadow(
+            image,
+            "Center target: align block center inside the inner ring before grasp refinement",
+            (16, 52),
+            scale=0.5,
+            color=(230, 230, 230),
+        )
+        return image
         
     def draw_detection_results(self, image, detection_data):
         """
@@ -100,6 +143,10 @@ class CameraVisualizationThread(threading.Thread):
                     
                     # 2. 绘制中心点（红色圆点）
                     cv2.circle(overlay, (cx, cy), 5, (0, 0, 255), -1)
+                    dx = cx - image_center_x
+                    dy = cy - image_center_y
+                    distance_px = float(np.hypot(dx, dy))
+                    cv2.line(overlay, (image_center_x, image_center_y), (cx, cy), color, 1, cv2.LINE_AA)
                     
                     # 3. 绘制方向箭头（蓝色箭头）
                     arrow_length = min(w, h) / 2
@@ -125,21 +172,15 @@ class CameraVisualizationThread(threading.Thread):
                     cv2.putText(overlay, coord_text, 
                             (cx - w//2, cy + h//2 + 50),
                             cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 255), 2)
+
+                    offset_text = f"Offset: dx={dx:+d}px dy={dy:+d}px dist={distance_px:.0f}px"
+                    cv2.putText(overlay, offset_text,
+                            (cx - w//2, cy + h//2 + 78),
+                            cv2.FONT_HERSHEY_SIMPLEX, 0.55, (255, 255, 255), 2)
                     
             except Exception as e:
                 print(f"绘制检测结果失败 {block_id}: {e}")
                 continue
-        
-        # 绘制图像中心十字（白色）
-        h, w = image.shape[:2]
-        center_x, center_y = w // 2, h // 2
-        cv2.line(overlay, (center_x-20, center_y), (center_x+20, center_y), (255, 255, 255), 2)
-        cv2.line(overlay, (center_x, center_y-20), (center_x, center_y+20), (255, 255, 255), 2)
-        
-        # 添加简洁的状态信息
-        status_text = f"Detections: {len(detection_data)} | Press 'D' to toggle | Press 'Q' to quit"
-        cv2.putText(overlay, status_text, (10, h - 20), 
-                cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 255), 2)
         
         return overlay
     
@@ -183,6 +224,12 @@ class CameraVisualizationThread(threading.Thread):
                                    (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 0, 255), 2)
                 
                 # 显示图像
+                detection_count = len(self.last_detection_result or {}) if self.show_detections else 0
+                detection_age = None
+                if self.show_detections and self.last_detection_time:
+                    detection_age = time.time() - self.last_detection_time
+                color_image = self.draw_alignment_overlay(color_image, detection_count, detection_age)
+
                 cv2.imshow('YOLO Detection Live View', color_image)
                 
                 # 处理按键
