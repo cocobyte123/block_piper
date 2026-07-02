@@ -887,11 +887,15 @@ def refine_position_to_center_with_spatial_tracking(robot, camera_manager, curre
 # ================= 抓取偏移计算函数 =================
 def calculate_grasp_offset(current_rz_deg, offset_distance_mm=20.0):
     """
-    根据夹爪RZ角度计算抓取偏移量
+    根据当前夹爪RZ角度计算抓取偏移量。
     
     原理：
-    - 夹爪的"前进方向"是沿着其本地坐标系的X轴
-    - 需要将本地偏移投影到世界坐标系（机械臂基座坐标系）
+    - 像素中心对齐后，相机/夹爪和积木的相对位置近似固定。
+    - 抓取点需要从当前夹爪位置沿夹爪“前方”偏移一段距离。
+    - 这里沿用原来的方向约定：
+      RZ=0°   -> 世界坐标 +Y
+      RZ=-90° -> 世界坐标 +X
+      RZ=180° -> 世界坐标 -Y
     
     Args:
         current_rz_deg: 当前夹爪RZ角度（度）
@@ -900,21 +904,15 @@ def calculate_grasp_offset(current_rz_deg, offset_distance_mm=20.0):
     Returns:
         (offset_x_m, offset_y_m): 机械臂基座坐标系下的XY偏移（米）
     """
-    # 将角度转换为弧度
     rz_rad = np.radians(current_rz_deg)
-    #todo 当前因为某些原因，不能用长轴的思路
-    rz_rad=-np.pi/2
-    # 夹爪的前进方向在世界坐标系中的投影
-    # 当RZ=0°时，夹爪朝向+Y方向
-    # 当RZ=-90°时，夹爪朝向+X方向
-    # 当RZ=-180°时，夹爪朝向-Y方向
-    
-    # 旋转矩阵：从夹爪本地坐标系到世界坐标系
-    # 夹爪本地X轴（前进方向）→ 世界坐标系
-    offset_x_m = offset_distance_mm / 1000.0 * np.cos(rz_rad + np.pi/2)
-    offset_y_m = offset_distance_mm / 1000.0 * np.sin(rz_rad + np.pi/2)
+    forward_rad = rz_rad + np.pi / 2
+    offset_distance_m = offset_distance_mm / 1000.0
+
+    offset_x_m = offset_distance_m * np.cos(forward_rad)
+    offset_y_m = offset_distance_m * np.sin(forward_rad)
     
     print(f"  [抓取偏移] RZ={current_rz_deg:.1f}°, 偏移{offset_distance_mm}mm")
+    print(f"             → 夹爪前方角度: {np.degrees(forward_rad):.1f}°")
     print(f"             → 世界坐标: ΔX={offset_x_m*1000:.2f}mm, ΔY={offset_y_m*1000:.2f}mm")
     
     return offset_x_m, offset_y_m

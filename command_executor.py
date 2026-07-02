@@ -352,8 +352,8 @@ class CommandExecutor:
             # --- 释放与撤离 ---
             print(f"  -> 9. 释放积木")
             self._gripper_open(1); time.sleep(0.5)     # 张开夹爪释放
-            self._move_to_cart_pose_piper(task['final_lift_pos'], place_orientation_quat)
-            time.sleep(1)      # 撤离后等待（s）
+            self._move_to_cart_pose_piper(task['final_lift_pos'], place_orientation_quat, speed=60)
+            time.sleep(0.1)      # 撤离后短暂等待（s）
 
         except Exception as e:
             print(f"\033[91m[任务执行失败]: {e}\033[0m"); import traceback; traceback.print_exc(); raise
