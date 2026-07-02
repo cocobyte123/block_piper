@@ -1350,7 +1350,7 @@ def select_best_candidate(processed_yolo_data, yolo_prefix, robot, camera_manage
             yolo_prefix, initial_world_pos,
             img_center_x=img_center_x, img_center_y=img_center_y,
             max_iterations=3,
-            tolerance_pixels=55,
+            tolerance_pixels=20,
             stage_name="粗对中",
             tracking_mode="world",
             use_pid=True,
