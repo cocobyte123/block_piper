@@ -36,11 +36,15 @@ CAMERA_COORDINATE_CONFIG = {
 # ================= 相机可视化线程 =================
 class CameraVisualizationThread(threading.Thread):
     """独立线程显示相机画面和YOLO检测结果"""
-    def __init__(self, detector):
+    def __init__(self, detector, detection_lock=None, detection_interval=0.5):
         super().__init__(daemon=True)
         self.detector = detector
+        self.detection_lock = detection_lock
+        self.detection_interval = detection_interval
+        self.last_detection_time = 0.0
+        self.last_detection_result = None
         self.running = True
-        self.show_detections = True  # 是否显示检测框
+        self.show_detections = False  # Press D to enable low-rate detection overlay.
         
     def draw_detection_results(self, image, detection_data):
         """
@@ -148,7 +152,14 @@ class CameraVisualizationThread(threading.Thread):
         print("   - 按 'Q' 键退出可视化")
         
         while self.running:
+            lock_acquired = False
             try:
+                if self.detection_lock:
+                    lock_acquired = self.detection_lock.acquire(blocking=False)
+                    if not lock_acquired:
+                        time.sleep(0.02)
+                        continue
+
                 # 获取原始图像
                 color_frame, _ = self.detector.get_frames()
                 if not color_frame:
@@ -160,10 +171,12 @@ class CameraVisualizationThread(threading.Thread):
                 # 如果需要显示检测结果
                 if self.show_detections:
                     try:
-                        # 快速获取检测结果（不要阻塞）
-                        detection_result = self.detector.run_single_detection()
-                        if detection_result:
-                            color_image = self.draw_detection_results(color_image, detection_result)
+                        now = time.time()
+                        if now - self.last_detection_time >= self.detection_interval:
+                            self.last_detection_result = self.detector.run_single_detection()
+                            self.last_detection_time = now
+                        if self.last_detection_result:
+                            color_image = self.draw_detection_results(color_image, self.last_detection_result)
                     except Exception as e:
                         # 检测失败时继续显示原图
                         cv2.putText(color_image, f"Detection Error: {str(e)[:50]}", 
@@ -185,6 +198,9 @@ class CameraVisualizationThread(threading.Thread):
             except Exception as e:
                 print(f"可视化线程错误: {e}")
                 time.sleep(0.1)
+            finally:
+                if lock_acquired:
+                    self.detection_lock.release()
         
         cv2.destroyAllWindows()
         print("📹 相机可视化已关闭")
@@ -198,14 +214,15 @@ class CameraManager:
     """相机管理类：保持相机持续开启，按需获取检测结果"""
     def __init__(self, enable_visualization=True):
         self.detector = DetectionSystem()
+        self.detection_lock = threading.Lock()
         self.enable_visualization = enable_visualization
         self.viz_thread = None
         
         if enable_visualization:
-            self.viz_thread = CameraVisualizationThread(self.detector)
+            self.viz_thread = CameraVisualizationThread(self.detector, self.detection_lock)
             self.viz_thread.start()
             print("✓ 相机可视化线程已启动")
-            print("   - 实时显示YOLO检测框和标签")
+            print("   - 默认显示原始画面；按 'D' 后以低频率显示YOLO检测框和标签")
             print("   - 按 'D' 切换检测框显示，按 'Q' 关闭窗口")
         
         print("✓ 相机系统已初始化（持续运行模式）")
@@ -230,7 +247,11 @@ class CameraManager:
     def get_detection(self, stabilize_time=1.5):
         """获取检测结果（原版，单次检测）"""
         time.sleep(stabilize_time)
-        return self.detector.run_single_detection()
+        return self._run_single_detection()
+    
+    def _run_single_detection(self):
+        with self.detection_lock:
+            return self.detector.run_single_detection()
     
     
     def get_stable_detection(self, num_samples=2, skip_frames=2, sample_interval=0.02, 
@@ -253,7 +274,7 @@ class CameraManager:
         # 跳过初始不稳定帧
         for i in range(skip_frames):
 
-            detection = self.detector.run_single_detection()
+            detection = self._run_single_detection()
             if detection:
                 pass
             else:
@@ -266,7 +287,7 @@ class CameraManager:
         for i in range(num_samples):
  
             
-            detection = self.detector.run_single_detection()
+            detection = self._run_single_detection()
             
             if detection:
                 samples.append(detection)
@@ -718,7 +739,7 @@ def refine_position_to_center_with_spatial_tracking(robot, camera_manager, curre
         robot.MotionCtrl_2(0x01, 0x00, 30, 0x00)
         robot.EndPoseCtrl(piper_pos[0], piper_pos[1], piper_pos[2], 
                          current_gripper_euler[0], current_gripper_euler[1], current_gripper_euler[2])
-        time.sleep(0.3)     # 对中微调等待（s）
+        time.sleep(0.15)    # 对中微调等待（s）
 
         # 获取实际位置
         end_pose_msg = robot.GetArmEndPoseMsgs()
@@ -731,7 +752,7 @@ def refine_position_to_center_with_spatial_tracking(robot, camera_manager, curre
         
         # 重新检测
         camera_manager.update_robot_pose(robot)
-        desktop_data = camera_manager.get_detection(stabilize_time=0.5)
+        desktop_data = camera_manager.get_detection(stabilize_time=0.1)
         
         if not desktop_data:
             print(f"       ✗ 迭代{iteration}: 未检测到积木")
