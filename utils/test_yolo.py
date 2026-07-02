@@ -9,8 +9,6 @@ import json
 import os 
 # from airbot_py.arm import AIRBOTPlay  # <--- 移除机械臂SDK导入
 from scipy.spatial.transform import Rotation
-from piper_sdk import C_PiperInterface_V2
-
 
 def get_z_axis_rotation_angle(quaternion, degrees=True):
     """
@@ -64,17 +62,19 @@ class DetectionSystem:
         self.pipeline.stop()
         print("相机已关闭。")
 
-    # 修改 run_single_detection 方法中的返回格式：
     def run_single_detection(self):
-        """执行单次检测并返回结果，不显示UI。"""
+        """
+        执行单次检测并返回结果，不显示UI。
+        """
         print("正在执行单次检测...")
         color_frame, depth_frame = self.get_frames()
         if not color_frame or not depth_frame:
-            print("获取帧失败,无法执行检测。")
+            print("获取帧失败，无法执行检测。")
             return None
         
         color_image = np.asanyarray(color_frame.get_data())
         
+        # 确保机器人位姿已设置
         if self.robot_position is None or self.robot_quaternion is None:
             print("错误：机器人位姿未设置，无法计算基座坐标。")
             return None
@@ -86,10 +86,8 @@ class DetectionSystem:
             self.robot_quaternion
         )
         
-        # 转换为desktop_data格式
-        desktop_data = {}
-        desktop_z = 0.014
-        
+        # 将检测结果转换为所需的字典格式
+        yolo_detected_data = {}
         if detections:
             sorted_detections = sorted(detections, key=lambda d: (d['class_id'], d['base_coords'][0]))
             category_counters = {1: 1, 2: 1, 3: 1, 4: 1}
@@ -105,29 +103,30 @@ class DetectionSystem:
                     block_name = "code4"
                 
                 coords = det['base_coords'].tolist()
-                
-                # ============ 关键修改：使用纯粹的像素角度 ============
-                pixel_angle_rad = det['z_angle_rad']  # 直接使用像素角度
-                
-                # 像素坐标
-                pixel_center = det['pixel_coords']
-                
-                # 格式：[[x, y, z], pixel_angle_rad, pixel_center]
-                desktop_data[block_name] = [[coords[0], coords[1], desktop_z], pixel_angle_rad, pixel_center]
-                
+                # angle_rad = det['z_angle_rad']
+
+                quat = det['quaternion']
+                angle_rad = Rotation.from_quat(quat).as_euler('xyz', degrees=False)[2]
+
+                yolo_detected_data[block_name] = [coords, angle_rad]
                 category_counters[cat_id] += 1
         
-        # print(f"检测完成，发现 {len(desktop_data)} 个物体。")
+        # 【新增】转换为desktop_data格式
+        desktop_data = {}
+        desktop_z = 0.014  # 假设的桌面高度
+        for key, value in yolo_detected_data.items():
+            coords, angle_rad = value
+            x, y, _ = coords  # 提取x, y，忽略z
+            
+            # 调整角度：转换为度，加90度，取0-180度范围，转回弧度
+            angle_deg = np.degrees(angle_rad)
+            adjusted_deg = (angle_deg + 90) % 180
+            adjusted_rad = np.radians(adjusted_deg)
+            
+            desktop_data[key] = [[x, y, desktop_z], adjusted_rad]
+        
+        print(f"检测完成，发现 {len(desktop_data)} 个物体。")
         return desktop_data
-
-    def _get_block_name_from_detection(self, det, category_counters):
-        """辅助函数：从detection生成block_name"""
-        cat_id = det['class_id'] + 1
-        if cat_id == 4:
-            return "code4"
-        # 这里需要维护一个计数逻辑，或者直接在主循环中处理
-        # 简化版本：返回None，让主循环处理
-        return None
 
 
     def load_config(self):
@@ -192,7 +191,7 @@ class DetectionSystem:
         self.color_intrinsics.fy = 611.72122191
         self.color_intrinsics.ppx = 331.62218223
         self.color_intrinsics.ppy = 261.36506807
-
+        
         print("信息：已替换为手动设置的相机内参:")
         print(f"  fx: {self.color_intrinsics.fx}, fy: {self.color_intrinsics.fy}")
         print(f"  ppx: {self.color_intrinsics.ppx}, ppy: {self.color_intrinsics.ppy}")
@@ -358,7 +357,19 @@ class DetectionSystem:
                    cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 255), 2)
     
     def process_frame(self, color_image, depth_frame, robot_position, robot_quaternion):
-        """处理单帧图像，检测物体并计算3D位置"""
+        """
+        处理单帧图像，检测物体并计算3D位置
+        
+        Args:
+            color_image: 彩色图像 (numpy array)
+            depth_frame: 深度帧 (pyrealsense2 depth frame)
+            robot_position: 机器人位置 [x, y, z]
+            robot_quaternion: 机器人姿态四元数 [qx, qy, qz, qw]
+            
+        Returns:
+            processed_image: 处理后的图像
+            detections: 检测结果列表
+        """
         # 运行YOLO检测
         results = self.model(color_image, verbose=False)[0]
         
@@ -387,13 +398,24 @@ class DetectionSystem:
                                 robot_position, robot_quaternion
                             )
 
-                            # ============ 关键修改：返回纯粹的像素角度 ============
-                            # 不再计算复杂的姿态变换链，直接使用图像角度
-                            pixel_angle_rad = np.radians(standard_angle)
+                            # 步骤 3: 计算姿态
+                            # 3.1. 物体相对于相机的姿态 (q_cam_obj)
+                            angle_rad = np.radians(standard_angle) # 使用标准角度
+                            half_angle = angle_rad / 2.0
+                            q_cam_obj = [0.0, 0.0, math.sin(half_angle), math.cos(half_angle)]
+
+                            # 3.2. 执行姿态变换链: q_base_obj = q_base_eef * q_eef_cam * q_cam_obj
+                            q_base_eef = robot_quaternion
                             
-                            # 构造一个简单的四元数，只表示像素角度（调试用）
-                            half_angle = pixel_angle_rad / 2.0
-                            pixel_quaternion = [0.0, 0.0, math.sin(half_angle), math.cos(half_angle)]
+                            # q_eef_obj = q_eef_cam * q_cam_obj
+                            q_eef_obj = self.multiply_quaternions(self.q_eef_cam, q_cam_obj)
+                            
+                            # q_base_obj = q_base_eef * q_eef_obj
+                            base_quaternion = self.multiply_quaternions(q_base_eef, q_eef_obj)
+
+                            # # 计算物体的四元数（假设只绕 Z 轴旋转）
+                            # half_angle = angle_rad / 2.0
+                            # quaternion = [0.0, 0.0, math.sin(half_angle), math.cos(half_angle)]
                             
                             # 保存检测结果
                             detection = {
@@ -402,13 +424,13 @@ class DetectionSystem:
                                 'pixel_coords': (cx, cy),
                                 'camera_coords': camera_coords,
                                 'base_coords': base_coords,
-                                'image_angle': standard_angle,  # 图像角度（度）
+                                'image_angle': standard_angle,
                                 'depth': depth_value,
                                 'confidence': conf,
                                 'size': (w, h),
                                 'obb_angle': angle_degrees,
-                                'z_angle_rad': pixel_angle_rad,  # ← 关键：纯粹的像素角度（弧度）
-                                'quaternion': pixel_quaternion   # 简化的四元数
+                                'z_angle_rad': np.radians(standard_angle),
+                                'quaternion': base_quaternion  # 修正：现在是物体在基坐标系下的四元数
                             }
                             detections.append(detection)
                             
@@ -559,27 +581,14 @@ class DetectionSystem:
 if __name__ == "__main__":
     detector = DetectionSystem()
 
-    print("\n[模式] 独立检测模式 (连接机械臂获取位姿)")
+    print("\n[模式] 独立检测模式 (无机械臂连接)")
     
-    # 初始化机械臂
-    CAN_IFACE = "can0"
-    robot = C_PiperInterface_V2(CAN_IFACE)
-    robot.ConnectPort()
-    while not robot.EnablePiper():
-        time.sleep(0.2)
+    # 设置一个默认的虚拟位姿
+    # 假设机械臂末端位于原点，无旋转
+    # 这样计算出的 "基座坐标" 实际上就是 "末端坐标" (经过手眼标定转换后的)
+    default_position = [0.0, 0.0, 0.0]
+    default_quaternion = [0.0, 0.0, 0.0, 1.0] # [x, y, z, w] 单位四元数
     
-    # 获取机械臂末端位姿并转换为YOLO需要的格式
-    end_pose_msg = robot.GetArmEndPoseMsgs()
-    default_position = [
-        end_pose_msg.end_pose.X_axis / 1000000.0,
-        end_pose_msg.end_pose.Y_axis / 1000000.0,
-        end_pose_msg.end_pose.Z_axis / 1000000.0
-    ]
-    default_quaternion = Rotation.from_euler('xyz', [
-        end_pose_msg.end_pose.RX_axis / 1000.0,
-        end_pose_msg.end_pose.RY_axis / 1000.0,
-        end_pose_msg.end_pose.RZ_axis / 1000.0
-    ], degrees=True).as_quat().tolist()
     print(f"使用默认虚拟位姿: Pos={default_position}, Quat={default_quaternion}")
     detector.set_robot_pose(default_position, default_quaternion)
     

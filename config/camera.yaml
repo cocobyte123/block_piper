@@ -1,6 +1,6 @@
 # YOLO detection settings.
 detection:
-  model_path: 'weights/best_1210_2.pt'
+  model_path: 'ckpt/best_yolo.pt'
   confidence_threshold: 0.5
 
 # Display settings.
