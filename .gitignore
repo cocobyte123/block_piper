@@ -1,2 +1,6 @@
 weights/
 *.pt
+__pycache__/
+*.npy
+*.npz
+*.png
