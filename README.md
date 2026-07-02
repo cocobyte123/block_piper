@@ -17,15 +17,16 @@ Core pipeline:
 
 ```text
 .
-├── main.py                 # Main pick-and-place build loop
-├── detection_system.py     # RealSense + YOLO detection and coordinate conversion
-├── task_scheduler.py       # Block definitions, build plan, placement strategy
-├── command_executor.py     # Piper motion and gripper execution
-├── visual_block.py         # Optional build-plan visualization helpers
-├── config/
-│   └── camera.yaml         # Camera, YOLO, and hand-eye parameters
-├── enable_can.sh           # CAN interface helper for Linux
-└── README.md
+|-- main.py                 # Main pick-and-place build loop
+|-- detection_system.py     # RealSense + YOLO detection and coordinate conversion
+|-- task_scheduler.py       # Block definitions, build plan, placement strategy
+|-- command_executor.py     # Piper motion and gripper execution
+|-- visual_block.py         # Optional build-plan visualization helpers
+|-- config/
+|   `-- camera.yaml         # Camera, YOLO, and hand-eye parameters
+|-- activate_hardware.sh    # One-command hardware activation and checks
+|-- enable_can.sh           # Minimal CAN interface helper for Linux
+`-- README.md
 ```
 
 YOLO weights are intentionally not tracked. Put the trained model at the path configured in `config/camera.yaml`, for example:
@@ -70,13 +71,34 @@ Edit `config/camera.yaml` before running:
 
 ## Run
 
-Enable the CAN interface on Linux:
+Activate hardware and run checks:
+
+```bash
+bash activate_hardware.sh
+```
+
+Activate hardware and start the demo:
+
+```bash
+bash activate_hardware.sh --run
+```
+
+Useful options:
+
+```bash
+bash activate_hardware.sh --can can1
+bash activate_hardware.sh --conda-env piper --run
+bash activate_hardware.sh --check-only
+bash activate_hardware.sh --viewer
+```
+
+If you only need to enable the CAN interface:
 
 ```bash
 sudo bash enable_can.sh
 ```
 
-Then run the main program:
+Then run the main program manually:
 
 ```bash
 python main.py
