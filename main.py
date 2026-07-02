@@ -537,6 +537,26 @@ def calculate_pixel_to_arm_transform(current_rz_deg):
     
     return final_transform
 
+def calculate_alignment_move_mm(error_px, error_py, current_rz_deg):
+    """
+    将图像中心误差转换为机械臂XY移动量，并根据当前RZ补偿相机视角旋转。
+
+    error_px/error_py 使用“图像中心 - 当前像素”的方向；内部会转换成
+    calculate_pixel_to_arm_transform 所需的“当前像素 - 图像中心”偏移。
+    """
+    pixel_offset = np.array([-error_px, -error_py])
+    transform = calculate_pixel_to_arm_transform(current_rz_deg)
+    arm_offset_px = transform @ pixel_offset
+
+    move_x_mm = arm_offset_px[0] * GLOBAL_PIXEL_TO_MM_RATIO['x']
+    move_y_mm = arm_offset_px[1] * GLOBAL_PIXEL_TO_MM_RATIO['y']
+
+    base_rz = CAMERA_COORDINATE_CONFIG['base_rz_deg']
+    rotation_dir = CAMERA_COORDINATE_CONFIG['rotation_direction']
+    relative_angle_deg = (current_rz_deg - base_rz) * rotation_dir
+
+    return move_x_mm, move_y_mm, relative_angle_deg
+
 
 # ================= 移动与观察函数 =================
 def move_to_observation_point(robot, pos, quat, speed=50):
@@ -668,9 +688,9 @@ class PixelPIDController:
         self.integral_y = 0.0
         self.has_prev_error = False
     
-    def compute(self, error_x, error_y, dt=1.0):
+    def compute_pixel_output(self, error_x, error_y, dt=1.0):
         """
-        计算PID输出
+        计算PID像素输出
         
         Args:
             error_x: X方向像素误差（目标 - 当前）
@@ -678,7 +698,7 @@ class PixelPIDController:
             dt: 时间步长（这里固定为1）
         
         Returns:
-            (move_x_mm, move_y_mm): 机械臂应移动的距离（毫米）
+            (output_px_x, output_px_y): 本轮需要修正的像素量
         """
         # 积分项
         self.integral_x += error_x * dt
@@ -705,6 +725,22 @@ class PixelPIDController:
         self.prev_error_x = error_x
         self.prev_error_y = error_y
         self.has_prev_error = True
+        
+        return output_px_x, output_px_y
+
+    def compute(self, error_x, error_y, dt=1.0):
+        """
+        计算PID输出
+        
+        Args:
+            error_x: X方向像素误差（目标 - 当前）
+            error_y: Y方向像素误差
+            dt: 时间步长（这里固定为1）
+        
+        Returns:
+            (move_x_mm, move_y_mm): 机械臂应移动的距离（毫米）
+        """
+        output_px_x, output_px_y = self.compute_pixel_output(error_x, error_y, dt=dt)
         
         # 转换为毫米（使用全局比例尺和方向）
         move_x_mm = (GLOBAL_PIXEL_TO_MM_RATIO['direction_y'] * 
@@ -884,10 +920,6 @@ def refine_position_to_center_with_spatial_tracking(robot, camera_manager, curre
     current_rz_deg = current_gripper_euler[2] / 1000.0
     print(f"     当前夹爪RZ: {current_rz_deg:.1f}°")
     
-    # 固定映射参数
-    direction_x = +1
-    direction_y = +1
-    ratio_mm_per_px = 0.67
     pid_controller = PixelPIDController(kp=pid_kp, ki=pid_ki, kd=pid_kd) if use_pid else None
     
     refined_pos = current_pos.copy()
@@ -911,11 +943,21 @@ def refine_position_to_center_with_spatial_tracking(robot, camera_manager, curre
         error_py = img_center_y - py
         
         if use_pid:
-            raw_move_x_mm, raw_move_y_mm = pid_controller.compute(error_px, error_py, dt=1.0)
+            control_px_x, control_px_y = pid_controller.compute_pixel_output(error_px, error_py, dt=1.0)
             print(f"       PID参数: kp={pid_kp:.2f}, ki={pid_ki:.2f}, kd={pid_kd:.2f}")
         else:
-            raw_move_x_mm = direction_y * error_py * ratio_mm_per_px
-            raw_move_y_mm = direction_x * error_px * ratio_mm_per_px
+            control_px_x, control_px_y = error_px, error_py
+        
+        raw_move_x_mm, raw_move_y_mm, relative_angle_deg = calculate_alignment_move_mm(
+            control_px_x,
+            control_px_y,
+            current_rz_deg
+        )
+        print(
+            f"       像素修正: 误差({error_px:.1f}, {error_py:.1f})px "
+            f"→ 本步({control_px_x:.1f}, {control_px_y:.1f})px, "
+            f"RZ方向补偿={relative_angle_deg:.1f}°"
+        )
         
         # 限制移动量
         max_move = max_move_mm
@@ -1350,12 +1392,12 @@ def select_best_candidate(processed_yolo_data, yolo_prefix, robot, camera_manage
             stage_name="旋转后精对中",
             tracking_mode="center",
             use_pid=True,
-            pid_kp=0.35,
+            pid_kp=0.60,
             pid_ki=0.0,
-            pid_kd=0.08,
+            pid_kd=0.04,
             max_move_mm=25.0,
-            motion_speed=12,
-            move_settle_time=0.08,
+            motion_speed=18,
+            move_settle_time=0.10,
             detect_stabilize_time=0.0,
             adaptive_stability=True,
             stable_frames=3,
