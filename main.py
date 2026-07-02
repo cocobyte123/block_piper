@@ -723,6 +723,112 @@ class PixelPIDController:
         self.integral_y = 0.0
         self.has_prev_error = False
 
+def pick_tracked_block_candidate(detection_data, target_yolo_prefix, tracking_mode,
+                                 reference_world_pos, img_center_x=320, img_center_y=240):
+    """按当前跟踪模式，从检测结果中选择一个同类型目标。"""
+    if not detection_data:
+        return None, []
+
+    candidates = []
+    image_center = np.array([img_center_x, img_center_y])
+    reference_world_pos = np.array(reference_world_pos[:3])
+
+    for block_id, data in detection_data.items():
+        if not block_id.startswith(target_yolo_prefix):
+            continue
+        if len(data) < 3 or data[2] is None:
+            continue
+
+        world_pos = np.array(data[0][:3])
+        pixel_pos = np.array(data[2])
+
+        if tracking_mode == "center":
+            metric = np.linalg.norm(pixel_pos - image_center)
+        else:
+            metric = np.linalg.norm(world_pos - reference_world_pos)
+
+        candidates.append((block_id, world_pos, pixel_pos, metric))
+
+    if not candidates:
+        return None, []
+
+    candidates.sort(key=lambda item: item[3])
+    return candidates[0], candidates
+
+def wait_for_stable_target_detection(robot, camera_manager, target_yolo_prefix, tracking_mode,
+                                     reference_world_pos, img_center_x=320, img_center_y=240,
+                                     stable_frames=3, stable_time=0.35,
+                                     stable_pixel_tolerance=4.0, max_wait_time=1.0,
+                                     sample_interval=0.03):
+    """等待目标像素位置稳定，返回最近一次稳定检测结果。"""
+    print(
+        f"       [自适应稳定检测] 连续{stable_frames}帧 / {stable_time:.2f}s, "
+        f"像素容差{stable_pixel_tolerance:.1f}px, 最多等待{max_wait_time:.2f}s"
+    )
+
+    start_time = time.perf_counter()
+    last_pixel = None
+    last_block_id = None
+    stable_count = 0
+    stable_since = None
+    last_detection = None
+    attempts = 0
+
+    while True:
+        attempts += 1
+        camera_manager.update_robot_pose(robot)
+        detection = camera_manager.get_detection(stabilize_time=0.0)
+        now = time.perf_counter()
+
+        selected, _ = pick_tracked_block_candidate(
+            detection,
+            target_yolo_prefix,
+            tracking_mode,
+            reference_world_pos,
+            img_center_x=img_center_x,
+            img_center_y=img_center_y
+        )
+
+        if selected is not None:
+            block_id, _, pixel_pos, metric = selected
+            last_detection = detection
+
+            if last_pixel is not None:
+                pixel_delta = np.linalg.norm(pixel_pos - last_pixel)
+            else:
+                pixel_delta = float("inf")
+
+            same_block = last_block_id == block_id
+            if last_pixel is not None and same_block and pixel_delta <= stable_pixel_tolerance:
+                stable_count += 1
+                if stable_since is None:
+                    stable_since = now
+            else:
+                stable_count = 1
+                stable_since = now
+
+            stable_duration = now - stable_since
+            print(
+                f"       稳定帧{attempts}: {block_id}, "
+                f"Δpixel={0.0 if pixel_delta == float('inf') else pixel_delta:.1f}px, "
+                f"稳定{stable_count}帧/{stable_duration:.2f}s"
+            )
+
+            if stable_count >= stable_frames and stable_duration >= stable_time:
+                print(f"       ✓ 目标检测已稳定，耗时{now - start_time:.2f}s")
+                return detection
+
+            last_pixel = pixel_pos
+            last_block_id = block_id
+        else:
+            print(f"       稳定帧{attempts}: 未检测到目标类型 {target_yolo_prefix}")
+
+        if now - start_time >= max_wait_time:
+            print(f"       ⚠ 稳定等待超时，使用最近一次检测结果")
+            return last_detection
+
+        time.sleep(sample_interval)
+
 # ================= 精确对中函数（PID版本）=================
 # ============ 修改精确对中函数，返回最终跟踪积木的角度 ============
 def refine_position_to_center_with_spatial_tracking(robot, camera_manager, current_pos, initial_pixel_offset, 
@@ -738,7 +844,13 @@ def refine_position_to_center_with_spatial_tracking(robot, camera_manager, curre
                                                    max_move_mm=50.0,
                                                    motion_speed=30,
                                                    move_settle_time=0.05,
-                                                   detect_stabilize_time=0.0):
+                                                   detect_stabilize_time=0.0,
+                                                   adaptive_stability=False,
+                                                   stable_frames=3,
+                                                   stable_time=0.35,
+                                                   stable_pixel_tolerance=4.0,
+                                                   stable_max_wait=1.0,
+                                                   stable_sample_interval=0.03):
     """
     空间跟踪精确对中：基于空间位置和类型跟踪，避免ID混淆
     
@@ -756,7 +868,10 @@ def refine_position_to_center_with_spatial_tracking(robot, camera_manager, curre
     print(f"     跟踪模式: {tracking_mode}")
     print(f"     控制模式: {'PID' if use_pid else '直接比例'}")
     print(f"     最大单步: {max_move_mm:.1f}mm, 速度: {motion_speed}")
-    print(f"     稳定等待: 移动后{move_settle_time:.2f}s + 检测前{detect_stabilize_time:.2f}s")
+    if adaptive_stability:
+        print(f"     稳定策略: 移动后{move_settle_time:.2f}s + 自适应检测稳定")
+    else:
+        print(f"     稳定等待: 移动后{move_settle_time:.2f}s + 检测前{detect_stabilize_time:.2f}s")
     
     # 获取当前夹爪姿态
     end_pose_msg = robot.GetArmEndPoseMsgs()
@@ -832,7 +947,23 @@ def refine_position_to_center_with_spatial_tracking(robot, camera_manager, curre
         # 重新检测
         camera_manager.update_robot_pose(robot)
         detect_start = time.perf_counter()
-        desktop_data = camera_manager.get_detection(stabilize_time=detect_stabilize_time)
+        if adaptive_stability:
+            desktop_data = wait_for_stable_target_detection(
+                robot,
+                camera_manager,
+                target_yolo_prefix,
+                tracking_mode,
+                initial_world_pos,
+                img_center_x=img_center_x,
+                img_center_y=img_center_y,
+                stable_frames=stable_frames,
+                stable_time=stable_time,
+                stable_pixel_tolerance=stable_pixel_tolerance,
+                max_wait_time=stable_max_wait,
+                sample_interval=stable_sample_interval
+            )
+        else:
+            desktop_data = camera_manager.get_detection(stabilize_time=detect_stabilize_time)
         detect_elapsed = time.perf_counter() - detect_start
         print(f"       重新检测耗时: {detect_elapsed:.2f}s")
         
@@ -1214,10 +1345,16 @@ def select_best_candidate(processed_yolo_data, yolo_prefix, robot, camera_manage
             pid_kp=0.35,
             pid_ki=0.0,
             pid_kd=0.08,
-            max_move_mm=8.0,
+            max_move_mm=15.0,
             motion_speed=12,
-            move_settle_time=0.35,
-            detect_stabilize_time=0.20
+            move_settle_time=0.08,
+            detect_stabilize_time=0.0,
+            adaptive_stability=True,
+            stable_frames=3,
+            stable_time=0.35,
+            stable_pixel_tolerance=4.0,
+            stable_max_wait=1.0,
+            stable_sample_interval=0.03
         )
         
         print(f"  -> 精确对中后: [{refined_pos[0]:.6f}, {refined_pos[1]:.6f}]")
