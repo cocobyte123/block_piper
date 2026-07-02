@@ -666,6 +666,7 @@ class PixelPIDController:
         self.prev_error_y = 0.0
         self.integral_x = 0.0
         self.integral_y = 0.0
+        self.has_prev_error = False
     
     def compute(self, error_x, error_y, dt=1.0):
         """
@@ -683,9 +684,13 @@ class PixelPIDController:
         self.integral_x += error_x * dt
         self.integral_y += error_y * dt
         
-        # 微分项
-        derivative_x = (error_x - self.prev_error_x) / dt
-        derivative_y = (error_y - self.prev_error_y) / dt
+        # 微分项：第一次没有历史误差，不引入额外冲击
+        if self.has_prev_error:
+            derivative_x = (error_x - self.prev_error_x) / dt
+            derivative_y = (error_y - self.prev_error_y) / dt
+        else:
+            derivative_x = 0.0
+            derivative_y = 0.0
         
         # PID输出（像素单位）
         output_px_x = (self.kp * error_x + 
@@ -699,6 +704,7 @@ class PixelPIDController:
         # 保存当前误差
         self.prev_error_x = error_x
         self.prev_error_y = error_y
+        self.has_prev_error = True
         
         # 转换为毫米（使用全局比例尺和方向）
         move_x_mm = (GLOBAL_PIXEL_TO_MM_RATIO['direction_y'] * 
@@ -715,6 +721,7 @@ class PixelPIDController:
         self.prev_error_y = 0.0
         self.integral_x = 0.0
         self.integral_y = 0.0
+        self.has_prev_error = False
 
 # ================= 精确对中函数（PID版本）=================
 # ============ 修改精确对中函数，返回最终跟踪积木的角度 ============
@@ -723,7 +730,15 @@ def refine_position_to_center_with_spatial_tracking(robot, camera_manager, curre
                                                    img_center_x=320, img_center_y=240,
                                                    max_iterations=3, tolerance_pixels=20,
                                                    stage_name="精确对中",
-                                                   tracking_mode="world"):
+                                                   tracking_mode="world",
+                                                   use_pid=False,
+                                                   pid_kp=0.35,
+                                                   pid_ki=0.0,
+                                                   pid_kd=0.05,
+                                                   max_move_mm=50.0,
+                                                   motion_speed=30,
+                                                   move_settle_time=0.05,
+                                                   detect_stabilize_time=0.0):
     """
     空间跟踪精确对中：基于空间位置和类型跟踪，避免ID混淆
     
@@ -739,6 +754,9 @@ def refine_position_to_center_with_spatial_tracking(robot, camera_manager, curre
     print(f"     初始世界位置: [{initial_world_pos[0]:.3f}, {initial_world_pos[1]:.3f}, {initial_world_pos[2]:.3f}]")
     print(f"     图像中心: ({img_center_x}, {img_center_y})")
     print(f"     跟踪模式: {tracking_mode}")
+    print(f"     控制模式: {'PID' if use_pid else '直接比例'}")
+    print(f"     最大单步: {max_move_mm:.1f}mm, 速度: {motion_speed}")
+    print(f"     稳定等待: 移动后{move_settle_time:.2f}s + 检测前{detect_stabilize_time:.2f}s")
     
     # 获取当前夹爪姿态
     end_pose_msg = robot.GetArmEndPoseMsgs()
@@ -755,6 +773,7 @@ def refine_position_to_center_with_spatial_tracking(robot, camera_manager, curre
     direction_x = +1
     direction_y = +1
     ratio_mm_per_px = 0.67
+    pid_controller = PixelPIDController(kp=pid_kp, ki=pid_ki, kd=pid_kd) if use_pid else None
     
     refined_pos = current_pos.copy()
     px, py = initial_pixel_offset
@@ -776,11 +795,15 @@ def refine_position_to_center_with_spatial_tracking(robot, camera_manager, curre
         error_px = img_center_x - px
         error_py = img_center_y - py
         
-        move_x_mm = direction_y * error_py * ratio_mm_per_px
-        move_y_mm = direction_x * error_px * ratio_mm_per_px
+        if use_pid:
+            move_x_mm, move_y_mm = pid_controller.compute(error_px, error_py, dt=1.0)
+            print(f"       PID参数: kp={pid_kp:.2f}, ki={pid_ki:.2f}, kd={pid_kd:.2f}")
+        else:
+            move_x_mm = direction_y * error_py * ratio_mm_per_px
+            move_y_mm = direction_x * error_px * ratio_mm_per_px
         
         # 限制移动量
-        max_move = 50.0
+        max_move = max_move_mm
         move_x_mm = max(-max_move, min(max_move, move_x_mm))
         move_y_mm = max(-max_move, min(max_move, move_y_mm))
         
@@ -792,10 +815,10 @@ def refine_position_to_center_with_spatial_tracking(robot, camera_manager, curre
         
         piper_pos = [int(round(p * 1000000)) for p in refined_pos]
         
-        robot.MotionCtrl_2(0x01, 0x00, 30, 0x00)
+        robot.MotionCtrl_2(0x01, 0x00, motion_speed, 0x00)
         robot.EndPoseCtrl(piper_pos[0], piper_pos[1], piper_pos[2], 
                          current_gripper_euler[0], current_gripper_euler[1], current_gripper_euler[2])
-        time.sleep(0.05)    # 对中微调等待（s）
+        time.sleep(move_settle_time)    # 对中微调等待（s）
 
         # 获取实际位置
         end_pose_msg = robot.GetArmEndPoseMsgs()
@@ -809,7 +832,7 @@ def refine_position_to_center_with_spatial_tracking(robot, camera_manager, curre
         # 重新检测
         camera_manager.update_robot_pose(robot)
         detect_start = time.perf_counter()
-        desktop_data = camera_manager.get_detection(stabilize_time=0.0)
+        desktop_data = camera_manager.get_detection(stabilize_time=detect_stabilize_time)
         detect_elapsed = time.perf_counter() - detect_start
         print(f"       重新检测耗时: {detect_elapsed:.2f}s")
         
@@ -1136,7 +1159,15 @@ def select_best_candidate(processed_yolo_data, yolo_prefix, robot, camera_manage
             max_iterations=3,
             tolerance_pixels=55,
             stage_name="粗对中",
-            tracking_mode="world"
+            tracking_mode="world",
+            use_pid=True,
+            pid_kp=0.65,
+            pid_ki=0.0,
+            pid_kd=0.04,
+            max_move_mm=25.0,
+            motion_speed=22,
+            move_settle_time=0.12,
+            detect_stabilize_time=0.05
         )
 
         print(f"  -> 粗对中后: [{rough_pos[0]:.6f}, {rough_pos[1]:.6f}], 像素({rough_pixel[0]:.1f}, {rough_pixel[1]:.1f})")
@@ -1145,7 +1176,7 @@ def select_best_candidate(processed_yolo_data, yolo_prefix, robot, camera_manage
         rotate_gripper_to_angle(robot, target_gripper_angle_rad)
         camera_manager.update_robot_pose(robot)
 
-        rotated_detection = camera_manager.get_detection(stabilize_time=0.05)
+        rotated_detection = camera_manager.get_detection(stabilize_time=0.20)
         tracked_id, tracked_data = find_center_tracked_candidate(
             rotated_detection,
             yolo_prefix,
@@ -1178,7 +1209,15 @@ def select_best_candidate(processed_yolo_data, yolo_prefix, robot, camera_manage
             max_iterations=5,
             tolerance_pixels=5,
             stage_name="旋转后精对中",
-            tracking_mode="center"
+            tracking_mode="center",
+            use_pid=True,
+            pid_kp=0.35,
+            pid_ki=0.0,
+            pid_kd=0.08,
+            max_move_mm=8.0,
+            motion_speed=12,
+            move_settle_time=0.35,
+            detect_stabilize_time=0.20
         )
         
         print(f"  -> 精确对中后: [{refined_pos[0]:.6f}, {refined_pos[1]:.6f}]")
