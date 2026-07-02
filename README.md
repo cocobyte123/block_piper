@@ -1,154 +1,89 @@
-<<<<<<< HEAD
+# block_piper
 
-## Piper 官方 SDK
+Vision-guided block picking and stacking with an AgileX Piper arm, Intel RealSense depth camera, and a YOLO OBB detector.
 
-https://github.com/agilexrobotics/piper_sdk
+## What It Does
 
-### 拉取
+This project detects blocks on a desktop, estimates their position and angle in the robot base frame, plans a layered block structure, and commands the Piper arm to pick and place each block.
 
-```
-cd ../
-git clone git@github.com:agilexrobotics/piper_sdk.git
-```
+Core pipeline:
 
-## PiperX + RealSense 初始化
+1. `detection_system.py` captures RealSense color/depth frames and runs YOLO detection.
+2. `task_scheduler.py` defines block types, build order, placement positions, and layer strategy.
+3. `command_executor.py` converts planned tasks into Piper arm and gripper commands.
+4. `main.py` coordinates camera observation, target selection, pose refinement, grasping, and placement.
 
-### 激活环境
+## Project Layout
 
-在联想小本儿上面运行  `conda activate piper`
-
-### RealSense
-
-运行指令
-
-```
-realsense-viewer
-```
-
-观察是否连接上对应的realsense摄像头，在这个界面能看到就ok
-
-### Piper
-
-#### 自用
-
-```
-sudo ip link set can0 down
-sudo ip link set can0 type can bitrate 1000000
-sudo ip link set can0 up
+```text
+.
+├── main.py                 # Main pick-and-place build loop
+├── detection_system.py     # RealSense + YOLO detection and coordinate conversion
+├── task_scheduler.py       # Block definitions, build plan, placement strategy
+├── command_executor.py     # Piper motion and gripper execution
+├── visual_block.py         # Optional build-plan visualization helpers
+├── config/
+│   └── camera.yaml         # Camera, YOLO, and hand-eye parameters
+├── enable_can.sh           # CAN interface helper for Linux
+└── README.md
 ```
 
-#### 官方
+YOLO weights are intentionally not tracked. Put the trained model at the path configured in `config/camera.yaml`, for example:
 
-- PC has only one USB-to-CAN module connected:
-
-```shell
-bash can_activate.sh can0 1000000
+```text
+weights/best_1210_2.pt
 ```
 
-Here, `can0` can be replaced with any name, and `1000000` is the baud rate, which cannot be changed.
+## Requirements
 
-- PC has multiple USB-to-CAN modules connected, but only one module is activated at a time
+Hardware:
 
-Note: This case applies when using both the robot arm and the chassis.
+- AgileX Piper arm
+- USB-CAN adapter
+- Intel RealSense depth camera
 
-(1) Find the USB hardware address of the CAN module. Unplug all CAN modules and plug in only the one connected to the robot arm, then execute:
+Python/runtime dependencies:
 
-```shell
-bash find_all_can_port.sh
+- `piper_sdk`
+- `pyrealsense2`
+- `ultralytics`
+- `opencv-python`
+- `numpy`
+- `scipy`
+- `pyyaml`
+- `matplotlib`
+
+Install the Piper SDK from the official repository and make sure it is importable by Python:
+
+```bash
+git clone https://github.com/agilexrobotics/piper_sdk.git
 ```
 
-Record the USB port value, for example, 3-1.4:1.0.
+## Configuration
 
-(2) Activate the CAN device. Assuming the USB port value is 3-1.4:1.0, run:
+Edit `config/camera.yaml` before running:
 
-```shell
-bash can_activate.sh can_piper 1000000 "3-1.4:1.0"
-```
+- `detection.model_path`: path to the YOLO model file
+- `detection.confidence_threshold`: detector confidence threshold
+- `camera_extrinsics.matrix`: hand-eye calibration transform
+- `camera_streams`: RealSense color/depth stream settings
 
-#### 运行前检查清单
+## Run
 
-1. CAN 适配器是否被识别
+Enable the CAN interface on Linux:
 
-```
-lsusb | grep "CAN adapter"
-```
-预期输出包含：`OpenMoko, Inc. Geschwister Schneider CAN adapter`
-
-2. can0 接口状态
-
-```
-ip link show can0
-```
-预期看到 <UP,NOARP> 且 state UP。如果显示 state DOWN，需要先执行：
-
-```
-cd /home/coco/python_xm/piper/block_model_12.29_v0
+```bash
 sudo bash enable_can.sh
 ```
-3. 相机是否连接
 
-```
-lsusb | grep RealSense
-```
-预期输出包含：`Intel(R) RealSense(TM) Depth Camera 455f`
+Then run the main program:
 
-
-一键检查脚本
-
-```
-echo "=== 1.CAN适配器 ===" && lsusb | grep "CAN adapter" && \
-echo "=== 2.can0状态 ===" && ip link show can0 | head -1 && \
-echo "=== 3.相机 ===" && lsusb | grep RealSense && \
-echo "=== 4.Python依赖 ===" && python3 -c "from piper_sdk import C_PiperInterface_V2; import numpy; import cv2; print('OK')" && \
-echo "=== 5.YOLO权重 ===" && ls -lh /home/coco/python_xm/piper/block_model_12.29_v0/weights/best_1210_2.pt && \
-echo "=== 全部检查通过 ==="
-```
-
-全部通过后，运行：
-```
-python /home/coco/python_xm/piper/block_model_12.29_v0/main.py
-```
-
-### 问题
-
-### 检测不到can0
-
-将机械臂USB接口直接连接到上位机，不要通过拓展坞。再次检测
-
-
-## 运行
-
-### 在 block_model 目录下
-
-```
-sudo bash enable_can.sh can0 1000000
-```
-
-### 在 piper_sdk/demo/v2 目录下
-
-重置
-```shell
-python piper_ctrl_reset.py
-```
-
-使能
-```
-python piper_ctrl_enable.py
-```
-
-回零
-```
-python piper_ctrl_go_zero.py
-```
-
-### 回到 block_model 目录
-
-```
+```bash
 python main.py
 ```
 
+## Notes
 
-## 记录
-=======
-# block_piper
->>>>>>> eedf57a7676d8876c339bfefd2887f60b73f5fba
+- The main program expects the Piper arm and RealSense camera to be connected.
+- The repository keeps only source code and configuration. Generated images, numpy calibration outputs, caches, and model weights are ignored.
+- Review all workspace positions and gripper parameters before running on real hardware.

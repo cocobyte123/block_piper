@@ -8,7 +8,7 @@ from scipy.spatial.transform import Rotation
 from command_executor import CommandExecutor
 from task_scheduler import TaskScheduler
 from piper_sdk import C_PiperInterface_V2
-from test_yolo import DetectionSystem
+from detection_system import DetectionSystem
 
 # ================= 全局变量 =================
 GLOBAL_PIXEL_TO_MM_RATIO = {
@@ -44,7 +44,7 @@ class CameraVisualizationThread(threading.Thread):
         
     def draw_detection_results(self, image, detection_data):
         """
-        在图像上绘制YOLO检测结果（参考test_yolo.py的绘制风格）
+        在图像上绘制YOLO检测结果（参考 detection_system.py 的绘制风格）
         
         Args:
             image: OpenCV图像
@@ -83,9 +83,9 @@ class CameraVisualizationThread(threading.Thread):
                 if pixel_pos:
                     cx, cy = int(pixel_pos[0]), int(pixel_pos[1])
                     
-                    # ============ 参考test_yolo.py的绘制方式 ============
+                    # ============ 参考 detection_system.py 的绘制方式 ============
                     
-                    # 1. 绘制OBB检测框（固定大小，类似test_yolo.py）
+                    # 1. 绘制OBB检测框（固定大小，类似 detection_system.py）
                     w, h = 80, 80  # 固定检测框大小
                     angle_degrees = np.degrees(angle_rad)
                     
@@ -104,7 +104,7 @@ class CameraVisualizationThread(threading.Thread):
                     cv2.arrowedLine(overlay, (cx, cy), (end_x, end_y), 
                                 (255, 0, 0), 3, tipLength=0.3)
                     
-                    # 4. 添加标签（参考test_yolo.py的文本样式）
+                    # 4. 添加标签（参考 detection_system.py 的文本样式）
                     label = f"{block_id}"
                     cv2.putText(overlay, label, 
                             (cx - w//2, cy - h//2 - 10),
@@ -1043,7 +1043,7 @@ def preprocess_yolo_angles(yolo_data, corrections, observation_rz_deg=-90.0):
 
     for block_id, data in processed_data.items():
         # 【关键修复】补偿观察姿态的RZ角度影响
-        # test_yolo.py 在计算角度时会将机械臂姿态叠加进去
+        # detection_system.py 在计算角度时会将机械臂姿态叠加进去
         # 需要减去观察点的RZ角度，恢复物体的真实图像角度
         angle_rad = data[1]
         angle_deg = np.degrees(angle_rad)

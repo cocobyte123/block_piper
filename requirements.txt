@@ -1,0 +1,7 @@
+numpy
+opencv-python
+pyrealsense2
+pyyaml
+scipy
+matplotlib
+ultralytics

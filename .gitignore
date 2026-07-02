@@ -1,6 +1,19 @@
+__pycache__/
+*.py[cod]
+
+# Model weights.
 weights/
 *.pt
-__pycache__/
+
+# Generated runtime outputs.
 *.npy
 *.npz
 *.png
+saved_frames/
+visualizations/
+yolo_output*.json
+
+# Local environment files.
+.venv/
+venv/
+.env
