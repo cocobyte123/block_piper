@@ -911,22 +911,27 @@ def refine_position_to_center_with_spatial_tracking(robot, camera_manager, curre
         error_py = img_center_y - py
         
         if use_pid:
-            move_x_mm, move_y_mm = pid_controller.compute(error_px, error_py, dt=1.0)
+            raw_move_x_mm, raw_move_y_mm = pid_controller.compute(error_px, error_py, dt=1.0)
             print(f"       PID参数: kp={pid_kp:.2f}, ki={pid_ki:.2f}, kd={pid_kd:.2f}")
         else:
-            move_x_mm = direction_y * error_py * ratio_mm_per_px
-            move_y_mm = direction_x * error_px * ratio_mm_per_px
+            raw_move_x_mm = direction_y * error_py * ratio_mm_per_px
+            raw_move_y_mm = direction_x * error_px * ratio_mm_per_px
         
         # 限制移动量
         max_move = max_move_mm
-        move_x_mm = max(-max_move, min(max_move, move_x_mm))
-        move_y_mm = max(-max_move, min(max_move, move_y_mm))
+        move_x_mm = max(-max_move, min(max_move, raw_move_x_mm))
+        move_y_mm = max(-max_move, min(max_move, raw_move_y_mm))
         
-        print(f"       移动指令: ΔX={move_x_mm:.2f}mm, ΔY={move_y_mm:.2f}mm")
+        print(
+            f"       移动指令: 原始ΔX={raw_move_x_mm:.2f}mm, 原始ΔY={raw_move_y_mm:.2f}mm "
+            f"→ 限幅后ΔX={move_x_mm:.2f}mm, ΔY={move_y_mm:.2f}mm"
+        )
         
         # 执行移动
+        command_start_pos = refined_pos.copy()
         refined_pos[0] += move_x_mm / 1000.0
         refined_pos[1] += move_y_mm / 1000.0
+        commanded_pos = refined_pos.copy()
         
         piper_pos = [int(round(p * 1000000)) for p in refined_pos]
         
@@ -934,15 +939,6 @@ def refine_position_to_center_with_spatial_tracking(robot, camera_manager, curre
         robot.EndPoseCtrl(piper_pos[0], piper_pos[1], piper_pos[2], 
                          current_gripper_euler[0], current_gripper_euler[1], current_gripper_euler[2])
         time.sleep(move_settle_time)    # 对中微调等待（s）
-
-        # 获取实际位置
-        end_pose_msg = robot.GetArmEndPoseMsgs()
-        actual_pos = [
-            end_pose_msg.end_pose.X_axis / 1000000.0,
-            end_pose_msg.end_pose.Y_axis / 1000000.0,
-            end_pose_msg.end_pose.Z_axis / 1000000.0
-        ]
-        refined_pos = np.array(actual_pos)
         
         # 重新检测
         camera_manager.update_robot_pose(robot)
@@ -966,6 +962,18 @@ def refine_position_to_center_with_spatial_tracking(robot, camera_manager, curre
             desktop_data = camera_manager.get_detection(stabilize_time=detect_stabilize_time)
         detect_elapsed = time.perf_counter() - detect_start
         print(f"       重新检测耗时: {detect_elapsed:.2f}s")
+
+        # 在稳定检测之后再读取实际位置，避免下一轮使用运动未完成时的旧位姿。
+        end_pose_msg = robot.GetArmEndPoseMsgs()
+        actual_pos = np.array([
+            end_pose_msg.end_pose.X_axis / 1000000.0,
+            end_pose_msg.end_pose.Y_axis / 1000000.0,
+            end_pose_msg.end_pose.Z_axis / 1000000.0
+        ])
+        actual_move_mm = np.linalg.norm((actual_pos[:2] - command_start_pos[:2]) * 1000.0)
+        command_error_mm = np.linalg.norm((commanded_pos[:2] - actual_pos[:2]) * 1000.0)
+        print(f"       实际XY移动: {actual_move_mm:.2f}mm, 距指令点: {command_error_mm:.2f}mm")
+        refined_pos = actual_pos
         
         if not desktop_data:
             print(f"       ✗ 迭代{iteration}: 未检测到积木")
@@ -1345,7 +1353,7 @@ def select_best_candidate(processed_yolo_data, yolo_prefix, robot, camera_manage
             pid_kp=0.35,
             pid_ki=0.0,
             pid_kd=0.08,
-            max_move_mm=15.0,
+            max_move_mm=25.0,
             motion_speed=12,
             move_settle_time=0.08,
             detect_stabilize_time=0.0,
