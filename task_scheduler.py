@@ -40,8 +40,11 @@ class TaskScheduler:
         
         # 4. 定义最终成品的“搭建架构” (分层结构)
         self._define_build_architecture()
+
+        # 5. 定义每块积木最终放置位置的人工残差修正
+        self._define_placement_residual_offsets()
         
-        # 5. 核心计算：根据架构和原型，计算所有积木的最终放置位置
+        # 6. 核心计算：根据架构和原型，计算所有积木的最终放置位置
         self._calculate_all_placements(np.array(first_block_target_pos))
         
         print(f"[TaskScheduler] 所有积木的放置位置已计算完毕。")
@@ -73,6 +76,54 @@ class TaskScheduler:
             "z_max": 0.40  # Z轴最大值 (米)
         }
         # 注意：Y轴不裁剪，因为所有积木的Y坐标都是一样的
+
+    def _define_placement_residual_offsets(self):
+        """
+        每块积木最终放置位置的人工残差修正。
+
+        单位：米。格式：[x, y, z]
+        例子：0.005 表示 +5mm，-0.003 表示 -3mm。
+
+        用途：补偿机械臂XY坐标系与桌面实际方向存在夹角、IK/标定误差等造成的
+        逐块最终摆放偏差。这里的修正会在理论位置全部计算完成后统一叠加。
+        """
+        self.placement_residual_offsets = {
+            "code1_1": [0.0, 0.0, 0.0],
+            "code1_2": [0.0, 0.0, 0.0],
+            "code1_3": [0.0, 0.0, 0.0],
+            "code1_4": [0.0, 0.0, 0.0],
+            "code2_1": [0.0, 0.0, 0.0],
+            "code2_2": [0.0, 0.0, 0.0],
+            "code2_3": [0.0, 0.0, 0.0],
+            "code3_1": [0.0, 0.0, 0.0],
+            "code3_2": [0.0, 0.0, 0.0],
+            "code4": [0.0, 0.0, 0.0],
+        }
+
+    def _apply_placement_residual_offsets(self):
+        """将人工残差修正叠加到每块积木的最终 place_pos 上。"""
+        if not getattr(self, "placement_residual_offsets", None):
+            return
+
+        for block_id, offset in self.placement_residual_offsets.items():
+            if block_id not in self.instances or "place_pos" not in self.instances[block_id]:
+                continue
+
+            offset_vec = np.array(offset, dtype=float)
+            if offset_vec.shape != (3,):
+                print(f"  -> \033[93m[残差修正跳过] '{block_id}' 的偏移不是 [x, y, z]: {offset}\033[0m")
+                continue
+
+            if np.allclose(offset_vec, 0.0):
+                continue
+
+            original_pos = self.instances[block_id]["place_pos"].copy()
+            self.instances[block_id]["place_pos"] = original_pos + offset_vec
+            print(
+                f"  -> \033[96m[残差修正] '{block_id}' "
+                f"Δ=({offset_vec[0]*1000:.1f}, {offset_vec[1]*1000:.1f}, {offset_vec[2]*1000:.1f})mm "
+                f"{original_pos} -> {self.instances[block_id]['place_pos']}\033[0m"
+            )
 
 
     def _clip_to_placement_region(self, pos: np.ndarray) -> np.ndarray:
@@ -294,6 +345,8 @@ class TaskScheduler:
                 original_pos = self.instances[block_id]["place_pos"]
                 self.instances[block_id]["place_pos"][1] += code3_y_offset
                 print(f"  -> \033[96m[硬编码偏移] '{block_id}' 的Y轴位置从 {original_pos[1]:.4f} 偏移到 {self.instances[block_id]['place_pos'][1]:.4f}\033[0m")
+
+        self._apply_placement_residual_offsets()
 
         
 
