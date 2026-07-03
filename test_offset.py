@@ -43,7 +43,6 @@ ALIGN_OFFSET_X_MM = 0.0
 ALIGN_OFFSET_Y_MM = 0.0
 
 # Offset 3: gripper-right offset after the gripper has rotated.
-GRASP_FORWARD_OFFSET_MM = 70.0
 GRASP_LATERAL_OFFSET_MM = 30.0
 
 PAUSE_AT_PICK_SECONDS = 5.0
@@ -144,7 +143,6 @@ def parse_args():
     parser.add_argument("--target-prefix", default=TARGET_PREFIX, help="YOLO id prefix, e.g. code1/code2/code3/code4")
     parser.add_argument("--align-x-mm", type=float, default=ALIGN_OFFSET_X_MM, help="Base-frame X offset after centering")
     parser.add_argument("--align-y-mm", type=float, default=ALIGN_OFFSET_Y_MM, help="Base-frame Y offset after centering")
-    parser.add_argument("--forward-mm", type=float, default=GRASP_FORWARD_OFFSET_MM, help="Main-style forward grasp offset")
     parser.add_argument("--lateral-mm", type=float, default=GRASP_LATERAL_OFFSET_MM, help="Gripper-right offset after rotation")
     parser.add_argument("--pause", type=float, default=PAUSE_AT_PICK_SECONDS, help="Pause seconds at final grasp pose")
     parser.add_argument("--align-iters", type=int, default=ALIGN_MAX_ITERATIONS, help="Max pixel-centering iterations")
@@ -162,7 +160,6 @@ def main():
     print(f"block_id={args.block_id}")
     print(f"target_prefix={args.target_prefix}")
     print(f"align_offset=({args.align_x_mm:.1f}, {args.align_y_mm:.1f})mm in base XY")
-    print(f"grasp_forward_offset={args.forward_mm:.1f}mm along gripper forward")
     print(f"grasp_lateral_offset={args.lateral_mm:.1f}mm along gripper right")
     print(f"pause={args.pause:.1f}s")
     print(f"iterative_alignment=max {args.align_iters} iterations, tolerance={args.align_tol:.1f}px")
@@ -263,19 +260,20 @@ def main():
         _, final_euler_deg = get_current_pose(robot)
         final_rz_deg = final_euler_deg[2]
 
-        print("\n--- 5. Apply main-style grasp offset and build pick task ---")
+        print("\n--- 5. Apply three-parameter grasp offset and build pick task ---")
         current_pos_after_rotate, _ = get_current_pose(robot)
-        offset_x_m, offset_y_m = calculate_grasp_offset(
+        align_offset_m = np.array([args.align_x_mm, args.align_y_mm]) / 1000.0
+        lateral_x_m, lateral_y_m = calculate_grasp_offset(
             final_rz_deg,
-            args.forward_mm,
+            0.0,
             lateral_offset_mm=args.lateral_mm,
         )
-        align_offset_m = np.array([args.align_x_mm, args.align_y_mm]) / 1000.0
-        final_x = current_pos_after_rotate[0] + align_offset_m[0] + offset_x_m
-        final_y = current_pos_after_rotate[1] + align_offset_m[1] + offset_y_m
+        final_x = current_pos_after_rotate[0] + align_offset_m[0] + lateral_x_m
+        final_y = current_pos_after_rotate[1] + align_offset_m[1] + lateral_y_m
 
         print(f"  -> rough-aligned XY: [{current_pos_after_rotate[0]:.6f}, {current_pos_after_rotate[1]:.6f}]")
         print(f"  -> base XY offset:  [{args.align_x_mm:.1f}, {args.align_y_mm:.1f}]mm")
+        print(f"  -> gripper lateral: [{lateral_x_m*1000:.1f}, {lateral_y_m*1000:.1f}]mm")
         print(f"  -> final grasp XY:  [{final_x:.6f}, {final_y:.6f}]")
 
         current_z = scheduler.instances[args.block_id]["initial_pos"][2]
