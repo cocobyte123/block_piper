@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
 """Test the simplified offset-based grasp flow.
 
-This script does not run the full build/place pipeline. It is meant for
+This script does not run the full build/place pipeline. It mirrors the main.py
+flow up to rough alignment and grasp, then skips placement. It is meant for
 calibrating three grasp offsets:
 
 1. ALIGN_OFFSET_X_MM: base-frame X offset after pixel centering.
@@ -17,9 +18,11 @@ import time
 
 import numpy as np
 
+from command_executor import CommandExecutor
 from main import (
     CameraManager,
     GLOBAL_OBSERVATION_CONFIG,
+    calculate_grasp_offset,
     calculate_gripper_angle,
     observe_from_global_view,
     observe_from_local_view,
@@ -28,25 +31,26 @@ from main import (
     rotate_gripper_to_angle,
 )
 from piper_sdk import C_PiperInterface_V2
+from task_scheduler import TaskScheduler
 
 
 CAN_IFACE = "can0"
 TARGET_PREFIX = "code1"
+BLOCK_ID = "code1_1"
 
 # Offset 1/2: base-frame fixed offset after pixel centering.
-ALIGN_OFFSET_X_MM = 0.0
+ALIGN_OFFSET_X_MM = 80.0
 ALIGN_OFFSET_Y_MM = 0.0
 
 # Offset 3: gripper-right offset after the gripper has rotated.
-GRASP_LATERAL_OFFSET_MM = 5.0
+GRASP_FORWARD_OFFSET_MM = 70.0
+GRASP_LATERAL_OFFSET_MM = 8.0
 
-PICK_Z_M = 0.120
-PRE_GRASP_HEIGHT_M = 0.080
 PAUSE_AT_PICK_SECONDS = 5.0
 CLOSE_GRIPPER_AFTER_PAUSE = False
 
-ALIGN_MAX_ITERATIONS = 5
-ALIGN_TOLERANCE_PIXELS = 15
+ALIGN_MAX_ITERATIONS = 3
+ALIGN_TOLERANCE_PIXELS = 12
 
 YOLO_CORRECTIONS = {
     "code3_1": [0.0, 0.0, -0.02, 0.0],
@@ -112,37 +116,36 @@ def choose_candidate(processed_yolo_data, target_prefix):
     if not candidates:
         return None, None
 
-    candidates.sort(key=lambda item: (item[2], item[1]), reverse=True)
+    candidates.sort(key=lambda item: item[2], reverse=True)
+    max_y = candidates[0][2]
+    y_tolerance = 0.010
+    y_similar_candidates = [
+        item for item in candidates
+        if abs(item[2] - max_y) <= y_tolerance
+    ]
+    y_similar_candidates.sort(key=lambda item: item[1], reverse=True)
+    selected = y_similar_candidates[0]
 
-    print("  -> Candidate list:")
+    print("  -> Candidate list (same strategy as main.py: max Y, then max X within 10mm Y):")
     for i, (block_id, pos_x, pos_y, pos_z, data) in enumerate(candidates):
-        marker = "*" if i == 0 else " "
+        marker = "*" if block_id == selected[0] else " "
         px, py = data[2]
         print(
             f"     {marker} {block_id}: world=({pos_x:.3f}, {pos_y:.3f}, {pos_z:.3f}), "
             f"pixel=({px:.1f}, {py:.1f})"
         )
 
-    return candidates[0][0], candidates[0][4]
-
-
-def gripper_right_offset_xy(current_rz_deg, lateral_offset_mm):
-    rz_rad = np.radians(current_rz_deg)
-    offset_m = lateral_offset_mm / 1000.0
-    return np.array([
-        offset_m * np.cos(rz_rad),
-        offset_m * np.sin(rz_rad),
-    ])
+    return selected[0], selected[4]
 
 
 def parse_args():
     parser = argparse.ArgumentParser(description="Offset calibration grasp test.")
+    parser.add_argument("--block-id", default=BLOCK_ID, help="Scheduler block id for grasp height, e.g. code1_1")
     parser.add_argument("--target-prefix", default=TARGET_PREFIX, help="YOLO id prefix, e.g. code1/code2/code3/code4")
     parser.add_argument("--align-x-mm", type=float, default=ALIGN_OFFSET_X_MM, help="Base-frame X offset after centering")
     parser.add_argument("--align-y-mm", type=float, default=ALIGN_OFFSET_Y_MM, help="Base-frame Y offset after centering")
+    parser.add_argument("--forward-mm", type=float, default=GRASP_FORWARD_OFFSET_MM, help="Main-style forward grasp offset")
     parser.add_argument("--lateral-mm", type=float, default=GRASP_LATERAL_OFFSET_MM, help="Gripper-right offset after rotation")
-    parser.add_argument("--pick-z", type=float, default=PICK_Z_M, help="Final grasp Z in meters")
-    parser.add_argument("--pre-height", type=float, default=PRE_GRASP_HEIGHT_M, help="Height above pick pose before descent")
     parser.add_argument("--pause", type=float, default=PAUSE_AT_PICK_SECONDS, help="Pause seconds at final grasp pose")
     parser.add_argument("--align-iters", type=int, default=ALIGN_MAX_ITERATIONS, help="Max pixel-centering iterations")
     parser.add_argument("--align-tol", type=float, default=ALIGN_TOLERANCE_PIXELS, help="Pixel-centering tolerance")
@@ -156,10 +159,12 @@ def main():
     np.set_printoptions(precision=4, suppress=True, linewidth=120)
 
     print("\n=== test_offset: simplified offset grasp test ===")
+    print(f"block_id={args.block_id}")
     print(f"target_prefix={args.target_prefix}")
     print(f"align_offset=({args.align_x_mm:.1f}, {args.align_y_mm:.1f})mm in base XY")
+    print(f"grasp_forward_offset={args.forward_mm:.1f}mm along gripper forward")
     print(f"grasp_lateral_offset={args.lateral_mm:.1f}mm along gripper right")
-    print(f"pick_z={args.pick_z:.3f}m, pre_height={args.pre_height:.3f}m, pause={args.pause:.1f}s")
+    print(f"pause={args.pause:.1f}s")
     print(f"iterative_alignment=max {args.align_iters} iterations, tolerance={args.align_tol:.1f}px")
     print(f"close_after_pause={args.close}")
 
@@ -172,13 +177,24 @@ def main():
     camera_manager = None
     try:
         camera_manager = CameraManager(enable_visualization=not args.no_viz)
-        gripper_open(robot)
+        executor = CommandExecutor(robot)
+        scheduler = TaskScheduler(first_block_target_pos=[0.0800, -0.200, 0.135])
+        build_order = (
+            scheduler.architecture["layer_1"] + scheduler.architecture["layer_2"] +
+            scheduler.architecture["layer_3"] + scheduler.architecture["layer_4"]
+        )
+
+        if args.block_id not in scheduler.instances:
+            print(f"Unknown block id for scheduler: {args.block_id}")
+            return
 
         print("\n--- 1. Global observation ---")
         global_data = observe_from_global_view(robot, camera_manager)
         if not global_data:
             print("No global detection.")
             return
+
+        gripper_open(robot)
 
         processed_global = preprocess_yolo_angles(
             global_data,
@@ -247,28 +263,47 @@ def main():
         _, final_euler_deg = get_current_pose(robot)
         final_rz_deg = final_euler_deg[2]
 
-        print("\n--- 5. Apply three offsets ---")
-        base_xy = aligned_pos[:2] + np.array([args.align_x_mm, args.align_y_mm]) / 1000.0
-        lateral_xy = gripper_right_offset_xy(final_rz_deg, args.lateral_mm)
-        grasp_xy = base_xy + lateral_xy
+        print("\n--- 5. Apply main-style grasp offset and build pick task ---")
+        current_pos_after_rotate, _ = get_current_pose(robot)
+        offset_x_m, offset_y_m = calculate_grasp_offset(
+            final_rz_deg,
+            args.forward_mm,
+            lateral_offset_mm=args.lateral_mm,
+        )
+        align_offset_m = np.array([args.align_x_mm, args.align_y_mm]) / 1000.0
+        final_x = current_pos_after_rotate[0] + align_offset_m[0] + offset_x_m
+        final_y = current_pos_after_rotate[1] + align_offset_m[1] + offset_y_m
 
-        print(f"  -> aligned_xy:     [{aligned_pos[0]:.6f}, {aligned_pos[1]:.6f}]")
-        print(f"  -> base XY offset: [{args.align_x_mm:.1f}, {args.align_y_mm:.1f}]mm")
-        print(f"  -> lateral offset: [{lateral_xy[0]*1000:.1f}, {lateral_xy[1]*1000:.1f}]mm (RZ={final_rz_deg:.1f}deg)")
-        print(f"  -> final grasp XY: [{grasp_xy[0]:.6f}, {grasp_xy[1]:.6f}]")
+        print(f"  -> rough-aligned XY: [{current_pos_after_rotate[0]:.6f}, {current_pos_after_rotate[1]:.6f}]")
+        print(f"  -> base XY offset:  [{args.align_x_mm:.1f}, {args.align_y_mm:.1f}]mm")
+        print(f"  -> final grasp XY:  [{final_x:.6f}, {final_y:.6f}]")
 
-        pre_grasp_pos = np.array([grasp_xy[0], grasp_xy[1], args.pick_z + args.pre_height])
-        pick_pos = np.array([grasp_xy[0], grasp_xy[1], args.pick_z])
+        current_z = scheduler.instances[args.block_id]["initial_pos"][2]
+        update_dict = {args.block_id: [[final_x, final_y, current_z], target_angle_rad]}
+        scheduler.update_initial_states_from_dict(update_dict)
 
-        print("\n--- 6. Move to inspection grasp pose ---")
-        move_to_pose(robot, pre_grasp_pos, final_euler_deg, speed=30, wait_time=0.8)
-        move_to_pose(robot, pick_pos, final_euler_deg, speed=12, wait_time=0.8)
+        current_task = scheduler.get_task_for_block(
+            args.block_id,
+            build_order,
+            executor.last_projected_grasp_error,
+        )
+        if current_task is None:
+            print("Failed to generate grasp task.")
+            return
+
+        print("\n--- 6. Execute grasp segment only, matching CommandExecutor ---")
+        pick_orientation_quat = executor._get_orientation_quat(current_task, "pick")
+        executor._move_to_cart_pose_piper(current_task["pre_grasp_pos"], pick_orientation_quat)
+        executor._gripper_open()
+        time.sleep(1.0)
+        executor._move_to_cart_pose_piper(current_task["pick_pos"], pick_orientation_quat)
 
         print(f"\n  -> Holding final grasp pose for {args.pause:.1f}s. Observe the offset now.")
         time.sleep(args.pause)
 
         if args.close:
-            gripper_close(robot)
+            executor._gripper_close()
+            time.sleep(1.0)
         else:
             print("  -> Skipping gripper close. Use --close when you want a real grasp test.")
 
