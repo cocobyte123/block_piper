@@ -1786,7 +1786,7 @@ def main():
                 enable_refinement=True,
                 enable_grasp_offset=True,
                 grasp_offset_mm=70.0,
-                grasp_lateral_offset_mm=8.0
+                grasp_lateral_offset_mm=25.0
             )
             
             if not selected_yolo_id:
