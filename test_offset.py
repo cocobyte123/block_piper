@@ -43,10 +43,10 @@ BLOCK_ID = "code1_1"
 # Keep that camera-to-gripper offset fixed here instead of rotating it by the
 # final grasp RZ.
 ALIGN_OFFSET_X_MM = 70.0
-ALIGN_OFFSET_Y_MM = 0.0
+ALIGN_OFFSET_Y_MM = -15.0
 
 # Offset 3: gripper-right offset after the gripper has rotated.
-GRASP_LATERAL_OFFSET_MM = 15.0
+GRASP_LATERAL_OFFSET_MM = 0.0
 
 PAUSE_AT_PICK_SECONDS = 5.0
 CLOSE_GRIPPER_AFTER_PAUSE = False
