@@ -32,6 +32,14 @@ CAMERA_COORDINATE_CONFIG = {
     'pixel_y_to_arm': 'X',     # 像素Y+对应机械臂哪个轴（RZ=-90°时）
 }
 
+EFFICIENT_GRASP_CONFIG = {
+    'align_offset_x_mm': 70.0,      # 粗对齐后，基座X方向固定补偿
+    'align_offset_y_mm': -15.0,     # 粗对齐后，基座Y方向固定补偿
+    'grasp_lateral_offset_mm': 0.0, # 夹爪右侧补偿，随最终RZ旋转
+    'align_max_iterations': 6,
+    'align_tolerance_pixels': 5,
+}
+
 
 # ================= 相机可视化线程 =================
 class CameraVisualizationThread(threading.Thread):
@@ -1257,8 +1265,11 @@ def select_best_candidate(processed_yolo_data, yolo_prefix, robot, camera_manage
                          target_gripper_angle_rad,
                          enable_refinement=True, 
                          enable_grasp_offset=True,
-                         grasp_offset_mm=50.0,
-                         grasp_lateral_offset_mm=5.0,
+                         align_offset_x_mm=EFFICIENT_GRASP_CONFIG['align_offset_x_mm'],
+                         align_offset_y_mm=EFFICIENT_GRASP_CONFIG['align_offset_y_mm'],
+                         grasp_lateral_offset_mm=EFFICIENT_GRASP_CONFIG['grasp_lateral_offset_mm'],
+                         align_max_iterations=EFFICIENT_GRASP_CONFIG['align_max_iterations'],
+                         align_tolerance_pixels=EFFICIENT_GRASP_CONFIG['align_tolerance_pixels'],
                          img_center_x=320, img_center_y=240):
     """
     选择积木：基于真实世界坐标（先左后右，从上到下 = Y最大，相近时X最大）
@@ -1327,7 +1338,7 @@ def select_best_candidate(processed_yolo_data, yolo_prefix, robot, camera_manage
     print(f"  -> [角度] 使用预先计算的角度: {np.degrees(target_gripper_angle_rad):.1f}°")
     gripper_angle_rad = target_gripper_angle_rad
     
-    # ============ 关键修改：使用空间跟踪精确对中 ============
+    # ============ 高效模式：前置像素对中 + 旋转 + 三参数抓取补偿 ============
     if enable_refinement and len(selected_data) >= 3 and selected_data[2] is not None:
         end_pose_msg = robot.GetArmEndPoseMsgs()
         current_pos = np.array([
@@ -1344,14 +1355,14 @@ def select_best_candidate(processed_yolo_data, yolo_prefix, robot, camera_manage
         print(f"     初始像素: ({selected_data[2][0]:.1f}, {selected_data[2][1]:.1f})")
         print(f"     初始世界位置: [{initial_world_pos[0]:.3f}, {initial_world_pos[1]:.3f}, {initial_world_pos[2]:.3f}]")
         
-        # 先做粗对中：只需要大致靠近中心，避免一上来旋转导致目标跑出视野。
+        # 只做旋转前像素对中：这一步已经足够稳定，后续不再做旋转后精对中。
         rough_pos, rough_pixel, tracked_world_pos = refine_position_to_center_with_spatial_tracking(
             robot, camera_manager, current_pos, selected_data[2], 
             yolo_prefix, initial_world_pos,
             img_center_x=img_center_x, img_center_y=img_center_y,
-            max_iterations=3,
-            tolerance_pixels=12,
-            stage_name="粗对中",
+            max_iterations=align_max_iterations,
+            tolerance_pixels=align_tolerance_pixels,
+            stage_name="高效像素对中",
             tracking_mode="world",
             use_pid=True,
             pid_kp=0.65,
@@ -1363,93 +1374,47 @@ def select_best_candidate(processed_yolo_data, yolo_prefix, robot, camera_manage
             detect_stabilize_time=0.05
         )
 
-        print(f"  -> 粗对中后: [{rough_pos[0]:.6f}, {rough_pos[1]:.6f}], 像素({rough_pixel[0]:.1f}, {rough_pixel[1]:.1f})")
+        print(f"  -> 像素对中后: [{rough_pos[0]:.6f}, {rough_pos[1]:.6f}], 像素({rough_pixel[0]:.1f}, {rough_pixel[1]:.1f})")
 
-        # 粗对中后先旋转夹爪，后续精对中基于最终抓取姿态进行。
+        # 对中后旋转夹爪；不再重新锁定/精对中，直接进入三参数抓取补偿。
         rotate_gripper_to_angle(robot, target_gripper_angle_rad)
         camera_manager.update_robot_pose(robot)
 
-        rotated_detection = camera_manager.get_detection(stabilize_time=0.20)
-        tracked_id, tracked_data = find_center_tracked_candidate(
-            rotated_detection,
-            yolo_prefix,
-            img_center_x=img_center_x,
-            img_center_y=img_center_y
-        )
-
-        if tracked_data is not None:
-            best_candidate = tracked_id
-            selected_data = tracked_data
-            initial_world_pos = selected_data[0][:3]
-            initial_pixel = selected_data[2]
-        else:
-            print("  ⚠ 旋转后未重新锁定目标，使用粗对中结果继续精对中")
-            initial_world_pos = tracked_world_pos
-            initial_pixel = rough_pixel
-
-        end_pose_msg = robot.GetArmEndPoseMsgs()
-        current_pos = np.array([
-            end_pose_msg.end_pose.X_axis / 1000000.0,
-            end_pose_msg.end_pose.Y_axis / 1000000.0,
-            end_pose_msg.end_pose.Z_axis / 1000000.0
-        ])
-
-        # 旋转后再做精对中：此时相机/夹爪和积木的相对关系已经是最终抓取姿态。
-        refined_pos, final_pixel, tracked_world_pos = refine_position_to_center_with_spatial_tracking(
-            robot, camera_manager, current_pos, initial_pixel,
-            yolo_prefix, initial_world_pos,
-            img_center_x=img_center_x, img_center_y=img_center_y,
-            max_iterations=5,
-            tolerance_pixels=5,
-            stage_name="旋转后精对中",
-            tracking_mode="center",
-            use_pid=True,
-            pid_kp=0.60,
-            pid_ki=0.0,
-            pid_kd=0.04,
-            max_move_mm=25.0,
-            motion_speed=18,
-            move_settle_time=0.10,
-            detect_stabilize_time=0.0,
-            adaptive_stability=True,
-            stable_frames=3,
-            stable_time=0.35,
-            stable_pixel_tolerance=4.0,
-            stable_max_wait=1.0,
-            stable_sample_interval=0.03
-        )
-        
-        print(f"  -> 精确对中后: [{refined_pos[0]:.6f}, {refined_pos[1]:.6f}]")
-        print(f"  -> 最终像素: ({final_pixel[0]:.1f}, {final_pixel[1]:.1f})")
-        
         # 应用抓取偏移（仅计算位置，不物理移动；偏移会合并到 execute_task 的 pre_grasp_pos 中）
         if enable_grasp_offset:
             end_pose_msg = robot.GetArmEndPoseMsgs()
             final_rz_deg = end_pose_msg.end_pose.RZ_axis / 1000.0
 
-            # 获取当前位置（对中后的位置）
+            # 获取当前位置（对中后、旋转后的实际位置）
             current_pos = [
                 end_pose_msg.end_pose.X_axis / 1000000.0,
                 end_pose_msg.end_pose.Y_axis / 1000000.0,
                 end_pose_msg.end_pose.Z_axis / 1000000.0
             ]
 
-            offset_x_m, offset_y_m = calculate_grasp_offset(
+            lateral_x_m, lateral_y_m = calculate_grasp_offset(
                 final_rz_deg,
-                grasp_offset_mm,
+                0.0,
                 lateral_offset_mm=grasp_lateral_offset_mm
             )
-            final_x = current_pos[0] + offset_x_m
-            final_y = current_pos[1] + offset_y_m
+            align_offset_x_m = align_offset_x_mm / 1000.0
+            align_offset_y_m = align_offset_y_mm / 1000.0
+            final_x = current_pos[0] + align_offset_x_m + lateral_x_m
+            final_y = current_pos[1] + align_offset_y_m + lateral_y_m
 
             selected_data[0][0] = final_x
             selected_data[0][1] = final_y
+            selected_data[2] = rough_pixel
 
-            print(f"  ✓ 抓取偏移计入: ΔX={offset_x_m*1000:.1f}mm, ΔY={offset_y_m*1000:.1f}mm → 目标 [{final_x:.6f}, {final_y:.6f}]")
+            print(
+                f"  ✓ 高效抓取补偿计入: 固定ΔX={align_offset_x_mm:.1f}mm, 固定ΔY={align_offset_y_mm:.1f}mm, "
+                f"夹爪右向ΔX={lateral_x_m*1000:.1f}mm, ΔY={lateral_y_m*1000:.1f}mm "
+                f"→ 目标 [{final_x:.6f}, {final_y:.6f}]"
+            )
         else:
-            selected_data[0][0] = refined_pos[0]
-            selected_data[0][1] = refined_pos[1]
-            selected_data[2] = final_pixel
+            selected_data[0][0] = rough_pos[0]
+            selected_data[0][1] = rough_pos[1]
+            selected_data[2] = rough_pixel
     
     return best_candidate, selected_data, gripper_angle_rad
 
@@ -1785,8 +1750,11 @@ def main():
                 target_gripper_angle_rad,  # 传入预先计算好的角度
                 enable_refinement=True,
                 enable_grasp_offset=True,
-                grasp_offset_mm=70.0,
-                grasp_lateral_offset_mm=25.0
+                align_offset_x_mm=EFFICIENT_GRASP_CONFIG['align_offset_x_mm'],
+                align_offset_y_mm=EFFICIENT_GRASP_CONFIG['align_offset_y_mm'],
+                grasp_lateral_offset_mm=EFFICIENT_GRASP_CONFIG['grasp_lateral_offset_mm'],
+                align_max_iterations=EFFICIENT_GRASP_CONFIG['align_max_iterations'],
+                align_tolerance_pixels=EFFICIENT_GRASP_CONFIG['align_tolerance_pixels']
             )
             
             if not selected_yolo_id:
