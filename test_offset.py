@@ -39,12 +39,12 @@ TARGET_PREFIX = "code1"
 BLOCK_ID = "code1_1"
 
 # Offset 1/2: base-frame fixed offset after pixel centering.
-ALIGN_OFFSET_X_MM = 80.0
+ALIGN_OFFSET_X_MM = 0.0
 ALIGN_OFFSET_Y_MM = 0.0
 
 # Offset 3: gripper-right offset after the gripper has rotated.
 GRASP_FORWARD_OFFSET_MM = 70.0
-GRASP_LATERAL_OFFSET_MM = 8.0
+GRASP_LATERAL_OFFSET_MM = 30.0
 
 PAUSE_AT_PICK_SECONDS = 5.0
 CLOSE_GRIPPER_AFTER_PAUSE = False
