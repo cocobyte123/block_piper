@@ -39,7 +39,10 @@ TARGET_PREFIX = "code1"
 BLOCK_ID = "code1_1"
 
 # Offset 1/2: base-frame fixed offset after pixel centering.
-ALIGN_OFFSET_X_MM = 0.0
+# The old "forward 70mm" at the rough-align pose (RZ=-90deg) is +X in base.
+# Keep that camera-to-gripper offset fixed here instead of rotating it by the
+# final grasp RZ.
+ALIGN_OFFSET_X_MM = 70.0
 ALIGN_OFFSET_Y_MM = 0.0
 
 # Offset 3: gripper-right offset after the gripper has rotated.
